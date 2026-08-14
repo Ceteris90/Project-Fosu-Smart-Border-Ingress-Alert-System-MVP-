@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+streamlit
+streamlit-folium
+folium
+pandas
+requests
+geopandas
+shapely
