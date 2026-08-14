@@ -26,7 +26,7 @@ class CrossingEvent(Base):
     monitored border corridor (not limited to pre-registered checkpoints).
     """
 
-     __tablename__ = "crossing_events"
+    __tablename__ = "crossing_events"
 
     id = Column(Integer, primary_key=True, index=True)
     latitude = Column(Float, nullable=False)
