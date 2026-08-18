@@ -1,9 +1,12 @@
-from sqlalchemy import column, integer, string, float, Datetime, boolean
 from datetime import datetime
+
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String
+
 from .database import Base
 
+
 class Checkpoint(Base):
-     """
+    """
     A known border post or monitored route.
     is_official=True  -> a legal, staffed port of entry (e.g. Aflao, Paga, Elubo)
     is_official=False -> an informal/unapproved route being monitored

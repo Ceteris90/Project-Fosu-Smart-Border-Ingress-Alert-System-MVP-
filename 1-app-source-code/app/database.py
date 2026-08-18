@@ -10,8 +10,10 @@ and
     add GeoAlchemy2 for real spatial columns/queries.
 """
 
+import os
+
 from sqlalchemy import create_engine
-form sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 
 """
@@ -19,14 +21,14 @@ form sqlalchemy.orm import sessionmaker, declarative_base
     ./fosu.db : Specifies the file path for the database. In this case, it will create a file named fosu.db in the current working directory where your script is running.
 """
 
-DATABASE_URL = "sqlite:///./fosu.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fosu.db")
 
 """
     create_engine(): The core interface to the database. It manages the actual connection pool.
     connect_args={"check_same_thread": False} : allowing multiple threads to safely share the database connection
 """
 engine = create_engine(
-    DATABASE_URL, connect_arg={"check_same_thread": False}
+    DATABASE_URL, connect_args={"check_same_thread": False}
 )
 
 """

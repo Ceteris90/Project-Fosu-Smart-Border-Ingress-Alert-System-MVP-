@@ -1,0 +1,19 @@
+services:
+  project-fosu:
+    build:
+      context: .
+      dockerfile: 1-app-source-code/Dockerfile
+    image: project-fosu:local
+    container_name: project-fosu
+    env_file:
+      - path: .env
+        format: raw
+    ports:
+      - "8000:8000"
+      - "8501:8501"
+    volumes:
+      - fosu-data:/data
+    restart: unless-stopped
+
+volumes:
+  fosu-data:

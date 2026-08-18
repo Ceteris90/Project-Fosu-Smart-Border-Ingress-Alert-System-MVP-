@@ -14,13 +14,15 @@ instead of in-process Python — the classify() interface stays the same.
 import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from shapely.geometry import shape, Point
 from shapely.ops import nearest_points
 
-CORRIDOR_PATH = "data/ghana_border_corridor.geojson"
-BORDERLINE_PATH = "data/ghana_borders.geojson"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+CORRIDOR_PATH = DATA_DIR / "ghana_border_corridor.geojson"
+BORDERLINE_PATH = DATA_DIR / "ghana_borders.geojson"
 
 # Grid cell size for hotspot aggregation, in degrees (~1.1km at this latitude).
 GRID_CELL_DEG = 0.01

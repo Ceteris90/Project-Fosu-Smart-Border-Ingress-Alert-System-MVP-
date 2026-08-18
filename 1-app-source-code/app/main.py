@@ -21,7 +21,7 @@ from sqlalchemy import func
 
 from . import models, schemas
 from .database import engine, get_db, Base
-from .geofence import geofence_engine
+from .geofence import BORDERLINE_PATH, CORRIDOR_PATH, geofence_engine
 
 Base.metadata.create_all(bind=engine)
 
@@ -82,9 +82,9 @@ def list_checkpoints(db: Session = Depends(get_db)):
 def border_geometry():
     """Serves the border line + corridor GeoJSON for map rendering."""
     import json
-    with open("data/ghana_borders.geojson") as f:
+    with open(BORDERLINE_PATH) as f:
         lines = json.load(f)
-    with open("data/ghana_border_corridor.geojson") as f:
+    with open(CORRIDOR_PATH) as f:
         corridor = json.load(f)
     return {"lines": lines, "corridor": corridor}
 

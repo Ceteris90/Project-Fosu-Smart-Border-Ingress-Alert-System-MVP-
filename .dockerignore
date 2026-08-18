@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+*.db
+*.sqlite3
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.streamlit

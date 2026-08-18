@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Optional
 
 class CrossingEventIn(BaseModel):
-     """
+    """
     Any sensor/camera/guard report anywhere along the border can submit this —
     it no longer needs to match a pre-registered checkpoint_id. The server
     figures out where it is relative to the border corridor and the nearest
