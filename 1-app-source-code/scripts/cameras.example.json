@@ -1,0 +1,29 @@
+{
+  "cameras": [
+    {
+      "camera_id": "aflao-cam-01",
+      "enabled": true,
+      "source": "rtsp://replace-with-camera-stream",
+      "camera_lat": 6.1219,
+      "camera_lon": 1.1974,
+      "lat_span": 0.0015,
+      "lon_span": 0.0015,
+      "post_interval": 5,
+      "min_confidence": 0.45,
+      "source_label": "camera_yolo_aflao",
+      "calibration_file": "1-app-source-code/scripts/calibration.example.json"
+    },
+    {
+      "camera_id": "paga-cam-01",
+      "enabled": false,
+      "source": "rtsp://replace-with-second-stream",
+      "camera_lat": 10.9974,
+      "camera_lon": -1.1181,
+      "lat_span": 0.0015,
+      "lon_span": 0.0015,
+      "post_interval": 5,
+      "min_confidence": 0.45,
+      "source_label": "camera_yolo_paga"
+    }
+  ]
+}

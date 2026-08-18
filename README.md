@@ -11,6 +11,63 @@ streamlit run 1-app-source-code/dashboard/dashboard.py
 
 Open `http://localhost:8501`. The dashboard is protected by a session login and does not request operational API data until authentication succeeds.
 
+## Replace mock sensor with YOLO detection
+
+You can feed live detections from a camera/video stream into the same existing ingestion logic (no backend changes required):
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+python 1-app-source-code/scripts/yolo_sensor.py \
+	--source 0 \
+	--camera-lat 6.1219 \
+	--camera-lon 1.1974 \
+	--post-interval 5 \
+	--display
+```
+
+Notes:
+
+- `--source` can be webcam index (`0`), video file path, or RTSP URL.
+- The script sends the same payload shape used by `mock_sensor.py` to `/ingest`.
+- Keep `uvicorn` running first so YOLO events can be recorded and visualized on the dashboard.
+
+### Multi-camera mode (one process)
+
+Use the JSON camera list (one worker thread per enabled camera):
+
+```bash
+python 1-app-source-code/scripts/yolo_sensor.py \
+	--config 1-app-source-code/scripts/cameras.example.json
+```
+
+Each camera entry can define its own `source`, geolocation, confidence threshold,
+post interval, and optional calibration file.
+
+### Zone calibration for better geolocation
+
+To map pixel regions to more realistic geo locations, provide a calibration file
+for each camera (example: `1-app-source-code/scripts/calibration.example.json`).
+
+Calibration format:
+
+```json
+{
+	"frame_width": 1920,
+	"frame_height": 1080,
+	"zones": [
+		{
+			"name": "zone-name",
+			"pixel": [x1, y1, x2, y2],
+			"geo": [min_lat, min_lon, max_lat, max_lon]
+		}
+	]
+}
+```
+
+If a detection center falls inside a zone, coordinates are projected using that
+zone mapping. If no zone matches, the script falls back to lat/lon span mapping.
+
 ## Run with Docker
 
 Build and start the API and dashboard with Compose:
@@ -20,6 +77,12 @@ docker compose up --build -d
 ```
 
 Compose loads dashboard credentials from `.env`, publishes ports `8000` and `8501`, and persists SQLite data in the `fosu-data` named volume.
+
+Compose also starts the `yolo-sensor` service, which reads camera streams from:
+
+- `1-app-source-code/scripts/cameras.example.json`
+
+Update that file with your real RTSP/video sources and camera coordinates.
 
 View logs or stop the application with:
 

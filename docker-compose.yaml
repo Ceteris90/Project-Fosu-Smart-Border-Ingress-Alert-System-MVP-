@@ -15,5 +15,22 @@ services:
       - fosu-data:/data
     restart: unless-stopped
 
+  yolo-sensor:
+    build:
+      context: .
+      dockerfile: 1-app-source-code/Dockerfile
+    image: project-fosu:local
+    container_name: project-fosu-yolo-sensor
+    depends_on:
+      - project-fosu
+    command:
+      - python
+      - 1-app-source-code/scripts/yolo_sensor.py
+      - --api-url
+      - http://project-fosu:8000/ingest
+      - --config
+      - 1-app-source-code/scripts/cameras.example.json
+    restart: unless-stopped
+
 volumes:
   fosu-data:

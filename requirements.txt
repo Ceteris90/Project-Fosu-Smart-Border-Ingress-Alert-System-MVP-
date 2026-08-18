@@ -10,3 +10,5 @@ requests
 python-dotenv
 geopandas
 shapely
+ultralytics
+opencv-python
