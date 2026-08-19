@@ -607,9 +607,13 @@ with analytics_tab:
             values="total_headcount",
             fill_value=0,
         )
+        chart_colors = [
+            "#286b48" if column == "Approved" else "#b94c4c"
+            for column in chart_data.columns
+        ]
         st.bar_chart(
             chart_data,
-            color=["#286b48", "#b94c4c"],
+            color=chart_colors,
             height=390,
             use_container_width=True,
         )

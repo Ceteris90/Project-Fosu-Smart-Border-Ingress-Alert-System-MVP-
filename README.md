@@ -32,6 +32,77 @@ Notes:
 - The script sends the same payload shape used by `mock_sensor.py` to `/ingest`.
 - Keep `uvicorn` running first so YOLO events can be recorded and visualized on the dashboard.
 
+### Switch sensors during a demonstration
+
+Keep the API and dashboard running in separate terminals:
+
+```bash
+source .venv/bin/activate
+uvicorn --app-dir 1-app-source-code app.main:app --host 127.0.0.1 --port 8000
+```
+
+```bash
+source .venv/bin/activate
+streamlit run 1-app-source-code/dashboard/dashboard.py
+```
+
+Run only one event producer at a time. Start with simulated events:
+
+```bash
+source .venv/bin/activate
+python3 1-app-source-code/scripts/mock_sensor.py --interval 5
+```
+
+Stop the mock sensor with `Ctrl+C`. For a short batch instead, use:
+
+```bash
+python3 1-app-source-code/scripts/mock_sensor.py --once --n 20
+```
+
+Then start the camera sensor:
+
+```bash
+source .venv/bin/activate
+python3 1-app-source-code/scripts/yolo_sensor.py \
+	--api-url http://127.0.0.1:8000/ingest \
+	--model yolov8n.pt \
+	--source 0 \
+	--classes person \
+	--low-light \
+	--infrared \
+	--inference-confidence 0.20 \
+	--min-confidence 0.20 \
+	--imgsz 640 \
+	--display
+```
+
+Stop YOLO with `q` in the preview window or `Ctrl+C` in its terminal before
+switching back to `mock_sensor.py`. Both sensors send events to the same
+`/ingest` endpoint, so new detections appear in the dashboard automatically.
+
+### Lightweight infrared night detection
+
+Use an IR-capable USB or RTSP camera with the lightweight YOLO model. The
+`--infrared` option enhances monochrome IR frames and converts them to the
+three-channel format expected by YOLO:
+
+```bash
+python 1-app-source-code/scripts/yolo_sensor.py \
+	--model yolov8n.pt \
+	--source 0 \
+	--classes person \
+	--infrared \
+	--inference-confidence 0.20 \
+	--min-confidence 0.20 \
+	--imgsz 640 \
+	--display
+```
+
+For small or distant people, use `yolov8s.pt` and `--imgsz 960`, but expect
+slower CPU inference. A thermal camera requires a model trained or fine-tuned
+on thermal imagery; ordinary YOLO weights may not detect thermal silhouettes
+reliably.
+
 ### Multi-camera mode (one process)
 
 Use the JSON camera list (one worker thread per enabled camera):

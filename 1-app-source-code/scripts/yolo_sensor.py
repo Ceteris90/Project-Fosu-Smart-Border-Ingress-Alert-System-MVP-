@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
+import numpy as np
 import requests
 
 try:
@@ -221,10 +222,42 @@ def post_event(
         print(f"ERR [{camera_id}] failed posting event: {exc} {detail}")
 
 
+def resolve_class_ids(model: YOLO, class_names: str) -> List[int]:
+    names = model.names
+    name_to_id = {str(label).lower(): int(class_id) for class_id, label in names.items()}
+    requested = [name.strip().lower() for name in class_names.split(",") if name.strip()]
+    unknown = [name for name in requested if name not in name_to_id]
+    if unknown:
+        available = ", ".join(sorted(name_to_id))
+        raise SystemExit(f"Unknown YOLO class(es): {', '.join(unknown)}. Available: {available}")
+    return [name_to_id[name] for name in requested]
+
+
+def enhance_low_light(frame):
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    lightness, channels_a, channels_b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced_lightness = clahe.apply(lightness)
+    enhanced = cv2.cvtColor(
+        cv2.merge((enhanced_lightness, channels_a, channels_b)), cv2.COLOR_LAB2BGR
+    )
+    gamma = 1.8
+    lookup = ((np.arange(256) / 255.0) ** (1.0 / gamma) * 255).astype("uint8")
+    return cv2.LUT(enhanced, lookup)
+
+
+def enhance_infrared(frame):
+    grayscale = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(grayscale)
+    return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+
 def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_event: threading.Event) -> None:
     calibration = load_zone_calibration(camera_cfg.calibration_file)
     model = YOLO(args.model)
-    person_class_id = 0  # COCO class id for person
+    target_class_ids = resolve_class_ids(model, args.classes)
+    class_labels = {class_id: str(model.names[class_id]) for class_id in target_class_ids}
     last_post_ts = 0.0
 
     print(
@@ -250,7 +283,18 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
                     print(f"WARN [{camera_cfg.camera_id}] frame read failed; reconnecting source")
                     break
 
-                result = model(frame, verbose=False)[0]
+                processed_frame = frame
+                if args.infrared:
+                    processed_frame = enhance_infrared(processed_frame)
+                if args.low_light:
+                    processed_frame = enhance_low_light(processed_frame)
+                result = model(
+                    processed_frame,
+                    classes=target_class_ids,
+                    conf=args.inference_confidence,
+                    imgsz=args.imgsz,
+                    verbose=False,
+                )[0]
                 boxes = result.boxes
                 centers: List[Tuple[float, float]] = []
                 confidences: List[float] = []
@@ -259,7 +303,7 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
                     for box in boxes:
                         cls_id = int(box.cls[0].item())
                         conf = float(box.conf[0].item())
-                        if cls_id != person_class_id or conf < camera_cfg.min_confidence:
+                        if conf < camera_cfg.min_confidence:
                             continue
 
                         x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -270,15 +314,15 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
 
                         if args.display:
                             cv2.rectangle(
-                                frame,
+                                processed_frame,
                                 (int(x1), int(y1)),
                                 (int(x2), int(y2)),
                                 (0, 200, 0),
                                 2,
                             )
                             cv2.putText(
-                                frame,
-                                f"person {conf:.2f}",
+                                processed_frame,
+                                f"{class_labels[cls_id]} {conf:.2f}",
                                 (int(x1), max(20, int(y1) - 8)),
                                 cv2.FONT_HERSHEY_SIMPLEX,
                                 0.5,
@@ -312,8 +356,8 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
 
                 if args.display:
                     cv2.putText(
-                        frame,
-                        f"{camera_cfg.camera_id} persons={len(centers)}",
+                        processed_frame,
+                        f"{camera_cfg.camera_id} detections={len(centers)}",
                         (16, 28),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.7,
@@ -322,7 +366,7 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
                         cv2.LINE_AA,
                     )
                     window_name = f"Project Fosu YOLO Sensor - {camera_cfg.camera_id}"
-                    cv2.imshow(window_name, frame)
+                    cv2.imshow(window_name, processed_frame)
                     if cv2.waitKey(1) & 0xFF == ord("q"):
                         stop_event.set()
                         break
@@ -427,6 +471,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="YOLO sensor -> Project Fosu ingest API")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="Ingest endpoint URL")
     parser.add_argument("--model", default="yolov8n.pt", help="YOLO model weights path")
+    parser.add_argument(
+        "--classes",
+        default=(
+            "person,bird,cat,dog,horse,sheep,cow,elephant,bear,zebra,giraffe,"
+            "car,motorcycle,bicycle,bus,truck"
+        ),
+        help=(
+            "Comma-separated YOLO class names; default covers common people, "
+            "animals, and vehicles"
+        ),
+    )
+    parser.add_argument(
+        "--low-light",
+        action="store_true",
+        help="Brighten dark frames and improve local contrast before detection",
+    )
+    parser.add_argument(
+        "--infrared",
+        action="store_true",
+        help="Preprocess monochrome IR camera frames for YOLO detection",
+    )
     parser.add_argument("--config", help="Path to multi-camera JSON config")
 
     parser.add_argument("--camera-id", default="cam-1", help="Single-camera mode identifier")
@@ -460,7 +525,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-confidence",
         type=float,
         default=0.45,
-        help="YOLO confidence threshold for person detections",
+        help="YOLO confidence threshold for selected detections",
+    )
+    parser.add_argument(
+        "--inference-confidence",
+        type=float,
+        default=0.20,
+        help="Minimum confidence used by YOLO before post-processing",
+    )
+    parser.add_argument(
+        "--imgsz",
+        type=int,
+        default=640,
+        help="YOLO inference image size; use 960 or 1280 for distant people",
     )
     parser.add_argument(
         "--source-label",

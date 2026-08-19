@@ -98,7 +98,7 @@ def ingest_event(event: schemas.CrossingEventIn, db: Session = Depends(get_db)):
     """
     result = geofence_engine.classify(event.latitude, event.longitude)
 
-    if not result.in_monitored_corridor:
+    if not result.in_monitored_corridor and not result.is_at_official_checkpoint:
         raise HTTPException(
             status_code=422,
             detail=(
@@ -108,7 +108,9 @@ def ingest_event(event: schemas.CrossingEventIn, db: Session = Depends(get_db)):
             ),
         )
 
-    if event.crossing_type_override:
+    if event.source.strip().lower() == "guard":
+        crossing_type = "approved"
+    elif event.crossing_type_override:
         crossing_type = event.crossing_type_override
     elif result.is_at_official_checkpoint:
         crossing_type = "approved"

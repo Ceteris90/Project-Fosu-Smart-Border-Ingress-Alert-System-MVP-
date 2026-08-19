@@ -15,13 +15,14 @@ import json
 import random
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import requests
 from shapely.geometry import shape
 from shapely.ops import substring
 
 API_URL = "http://localhost:8000/ingest"
-BORDERLINES_PATH = "data/ghana_borders.geojson"
+BORDERLINES_PATH = Path(__file__).resolve().parent.parent / "data" / "ghana_borders.geojson"
 
 # Real official checkpoints, used to bias some traffic toward "approved" crossings.
 OFFICIAL_POINTS = [
@@ -65,13 +66,17 @@ def random_point_on_border(lines, hotspot_bias=0.3, hotspots=None):
     return lat, lon
 
 
-def send_event(lat, lon, crossing_type_hint=None, timestamp=None):
+def send_event(lat, lon, crossing_type_hint=None, timestamp=None, source=None):
+    event_source = source or random.choice(["camera", "sensor", "guard"])
+    if event_source == "guard":
+        crossing_type_hint = "approved"
+
     payload = {
         "latitude": lat,
         "longitude": lon,
         "estimated_headcount": random.randint(1, 6),
         "confidence_score": round(random.uniform(0.7, 0.99), 2),
-        "source": random.choice(["camera", "sensor", "guard"]),
+        "source": event_source,
     }
     if crossing_type_hint:
         payload["crossing_type_override"] = crossing_type_hint
@@ -98,10 +103,12 @@ def seed_history(n: int, lines, hotspots):
             lat, lon = random.choice(OFFICIAL_POINTS)
             lat += random.uniform(-0.002, 0.002)
             lon += random.uniform(-0.002, 0.002)
+            crossing_type_hint = "approved"
         else:
             lat, lon = random_point_on_border(lines, hotspots=hotspots)
+            crossing_type_hint = "unapproved_route"
         ts = now - timedelta(minutes=random.randint(0, 48 * 60))
-        send_event(lat, lon, timestamp=ts)
+        send_event(lat, lon, crossing_type_hint=crossing_type_hint, timestamp=ts)
 
 
 def live_loop(interval, lines, hotspots):
@@ -111,9 +118,11 @@ def live_loop(interval, lines, hotspots):
             lat, lon = random.choice(OFFICIAL_POINTS)
             lat += random.uniform(-0.002, 0.002)
             lon += random.uniform(-0.002, 0.002)
+            crossing_type_hint = "approved"
         else:
             lat, lon = random_point_on_border(lines, hotspots=hotspots)
-        send_event(lat, lon)
+            crossing_type_hint = "unapproved_route"
+        send_event(lat, lon, crossing_type_hint=crossing_type_hint)
         time.sleep(interval)
 
 
