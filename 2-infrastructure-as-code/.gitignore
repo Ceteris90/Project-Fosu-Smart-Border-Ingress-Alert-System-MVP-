@@ -1,0 +1,9 @@
+*.tfvars
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+crash.*.log
+*.pem
+*.pfx
+*.key

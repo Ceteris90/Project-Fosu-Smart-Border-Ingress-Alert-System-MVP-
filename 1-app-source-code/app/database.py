@@ -27,9 +27,8 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fosu.db")
     create_engine(): The core interface to the database. It manages the actual connection pool.
     connect_args={"check_same_thread": False} : allowing multiple threads to safely share the database connection
 """
-engine = create_engine(
-    DATABASE_URL, connect_args={"check_same_thread": False}
-)
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
 
 """
     sessionmaker: Creates a factory for generating database sessions (SessionLocal). A session is what you use to write, read, update, and delete records (queries).

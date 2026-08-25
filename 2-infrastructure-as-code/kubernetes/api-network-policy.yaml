@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fosu-api-internal-only
+  namespace: project-fosu
+spec:
+  podSelector:
+    matchLabels:
+      app: fosu-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: fosu-dashboard
+        - podSelector:
+            matchLabels:
+              app: fosu-yolo-sensor
+      ports:
+        - protocol: TCP
+          port: 8000

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fosu-dashboard
+  namespace: project-fosu
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fosu-dashboard
+  template:
+    metadata:
+      labels:
+        app: fosu-dashboard
+    spec:
+      nodeSelector:
+        project-fosu/workload: application
+      containers:
+        - name: dashboard
+          image: "{{ image }}"
+          command: ["streamlit"]
+          args: ["run", "1-app-source-code/dashboard/dashboard.py", "--server.address", "0.0.0.0", "--server.port", "8501"]
+          ports:
+            - name: http
+              containerPort: 8501
+          env:
+            - name: API_BASE
+              value: "http://fosu-api:8000"
+          envFrom:
+            - secretRef:
+                name: fosu-app-secrets
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fosu-dashboard
+  namespace: project-fosu
+spec:
+  type: ClusterIP
+  selector:
+    app: fosu-dashboard
+  ports:
+    - name: http
+      port: 8501
+      targetPort: http

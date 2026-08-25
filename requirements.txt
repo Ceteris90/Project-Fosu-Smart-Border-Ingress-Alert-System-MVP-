@@ -7,6 +7,7 @@ streamlit-folium
 folium
 pandas
 requests
+psycopg2-binary
 python-dotenv
 geopandas
 shapely

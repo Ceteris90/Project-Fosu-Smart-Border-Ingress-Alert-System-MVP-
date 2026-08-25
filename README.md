@@ -1,6 +1,8 @@
 # Project-Fosu-Smart-Border-Ingress-Alert-System-MVP-
 A prototype border-crossing logging, mapping, and threshold-alert system that covers **the whole border**, not just a handful of named checkpoints.
 
+Azure AKS/VPN/private-database deployment files are in [`2-infrastructure-as-code`](2-infrastructure-as-code/README.md).
+
 ## Run locally
 
 ```bash

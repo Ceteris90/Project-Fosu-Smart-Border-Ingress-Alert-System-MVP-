@@ -1,0 +1,139 @@
+---
+- name: Configure Project Fosu on private AKS
+  hosts: aks_control
+  gather_facts: false
+  collections:
+    - kubernetes.core
+  vars:
+    kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default('/tmp/project-fosu-kubeconfig', true) }}"
+    manifest_files:
+      - api.yaml
+      - dashboard.yaml
+      - yolo-sensor.yaml
+      - api-network-policy.yaml
+      - dashboard-ingress.yaml
+
+  pre_tasks:
+    - name: Require protected application variables
+      ansible.builtin.assert:
+        that:
+          - database_url is defined
+          - database_url | length > 0
+          - dashboard_username is defined
+          - dashboard_password_hash is defined
+          - image is defined
+          - image is not search('REPLACE_')
+        fail_msg: "Set protected values in Ansible Vault or pass them with --extra-vars."
+
+    - name: Require Azure CLI and kubectl
+      ansible.builtin.command: "{{ item }} --version"
+      changed_when: false
+      loop:
+        - az
+        - kubectl
+
+  tasks:
+    - name: Get private AKS credentials
+      ansible.builtin.command:
+        argv:
+          - az
+          - aks
+          - get-credentials
+          - --resource-group
+          - "{{ azure_resource_group }}"
+          - --name
+          - "{{ aks_cluster_name }}"
+          - --file
+          - "{{ kubeconfig_path }}"
+          - --overwrite-existing
+      changed_when: true
+      no_log: true
+
+    - name: Check private AKS API connectivity
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+          - get
+          - namespace
+      changed_when: false
+
+    - name: Create application namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ fosu_namespace }}"
+            labels:
+              pod-security.kubernetes.io/enforce: restricted
+
+    - name: Create private application Secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        apply: true
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: fosu-app-secrets
+            namespace: "{{ fosu_namespace }}"
+          type: Opaque
+          stringData:
+            DATABASE_URL: "{{ database_url }}"
+            FOSU_DASHBOARD_USERNAME: "{{ dashboard_username }}"
+            FOSU_DASHBOARD_PASSWORD_HASH: "{{ dashboard_password_hash }}"
+      no_log: true
+
+    - name: Render image and hostname into manifests
+      ansible.builtin.template:
+        src: "{{ kubernetes_manifest_dir }}/{{ item }}"
+        dest: "/tmp/project-fosu-{{ item }}"
+        mode: "0600"
+      loop: "{{ manifest_files }}"
+      vars:
+        acr_image: "{{ image }}"
+      register: rendered_manifests
+
+    - name: Apply workload manifests
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        src: "{{ item.dest }}"
+      loop: "{{ rendered_manifests.results }}"
+
+    - name: Wait for API deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ fosu_namespace }}"
+        name: fosu-api
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 600
+
+    - name: Wait for dashboard deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ fosu_namespace }}"
+        name: fosu-dashboard
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 600
+
+    - name: Remove rendered temporary manifests
+      ansible.builtin.file:
+        path: "{{ item.dest }}"
+        state: absent
+      loop: "{{ rendered_manifests.results }}"

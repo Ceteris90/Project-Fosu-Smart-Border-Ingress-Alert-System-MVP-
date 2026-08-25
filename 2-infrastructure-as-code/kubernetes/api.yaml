@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fosu-api
+  namespace: project-fosu
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: fosu-api
+  template:
+    metadata:
+      labels:
+        app: fosu-api
+    spec:
+      nodeSelector:
+        project-fosu/workload: application
+      containers:
+        - name: api
+          image: "{{ image }}"
+          command: ["uvicorn"]
+          args: ["--app-dir", "1-app-source-code", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: fosu-app-secrets
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fosu-api
+  namespace: project-fosu
+spec:
+  type: ClusterIP
+  selector:
+    app: fosu-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

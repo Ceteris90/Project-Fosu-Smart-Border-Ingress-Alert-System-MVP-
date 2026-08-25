@@ -1,0 +1,4 @@
+inventory.ini
+group_vars/all.yml
+*.vault.yml
+*.vault

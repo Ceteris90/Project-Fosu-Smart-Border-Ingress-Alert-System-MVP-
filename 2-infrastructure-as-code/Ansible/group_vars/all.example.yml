@@ -1,0 +1,15 @@
+---
+azure_resource_group: "rg-fosu-prod"
+aks_cluster_name: "aks-fosu-prod"
+aks_context: "aks-fosu-prod-admin"
+
+fosu_namespace: "project-fosu"
+image: "REPLACE_ACR_LOGIN_SERVER/project-fosu:TAG"
+dashboard_hostname: "dashboard.example.gov.gh"
+
+# Keep this file encrypted with ansible-vault after populating it.
+database_url: "postgresql+psycopg2://USER:PASSWORD@PRIVATE_POSTGRES_FQDN:5432/fosu?sslmode=require"
+dashboard_username: "fosu.admin"
+dashboard_password_hash: "scrypt$..."
+
+kubernetes_manifest_dir: "{{ playbook_dir }}/../kubernetes"
