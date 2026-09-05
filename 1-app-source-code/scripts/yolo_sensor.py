@@ -16,7 +16,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -62,6 +62,17 @@ def parse_source(value: Union[str, int]) -> Union[int, str]:
         return value
     text = str(value).strip()
     return int(text) if text.isdigit() else text
+
+
+def validate_local_source(source: Union[int, str]) -> None:
+    if isinstance(source, int) or "://" in source:
+        return
+    path = Path(source).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Video source does not exist or is not a file: {path}. "
+            "Use an existing video path, webcam index, or RTSP URL."
+        )
 
 
 def clamp(value: float, min_value: float, max_value: float) -> float:
@@ -184,6 +195,7 @@ def approximate_event_position(
 
 
 def post_event(
+    session: requests.Session,
     api_url: str,
     latitude: float,
     longitude: float,
@@ -192,34 +204,49 @@ def post_event(
     source: str,
     timeout: float,
     camera_id: str,
+    retries: int,
+    retry_delay: float,
 ) -> None:
     payload = {
         "latitude": latitude,
         "longitude": longitude,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "estimated_headcount": estimated_headcount,
         "confidence_score": round(confidence_score, 2),
         "source": source,
     }
 
-    try:
-        response = requests.post(api_url, json=payload, timeout=timeout)
-        response.raise_for_status()
-        data = response.json()
-        print(
-            "OK "
-            f"[{camera_id}] "
-            f"headcount={estimated_headcount:2d} "
-            f"conf={confidence_score:.2f} "
-            f"({latitude:.5f},{longitude:.5f}) -> "
-            f"{data.get('crossing_type')} "
-            f"near {data.get('nearest_checkpoint_code')}"
-        )
-    except requests.RequestException as exc:
-        detail = ""
-        if getattr(exc, "response", None) is not None:
-            detail = exc.response.text
-        print(f"ERR [{camera_id}] failed posting event: {exc} {detail}")
+    for attempt in range(retries + 1):
+        try:
+            response = session.post(api_url, json=payload, timeout=timeout)
+            response.raise_for_status()
+            data = response.json()
+            print(
+                "OK "
+                f"[{camera_id}] "
+                f"headcount={estimated_headcount:2d} "
+                f"conf={confidence_score:.2f} "
+                f"({latitude:.5f},{longitude:.5f}) -> "
+                f"{data.get('crossing_type')} "
+                f"near {data.get('nearest_checkpoint_code')}"
+            )
+            return
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            if attempt >= retries:
+                print(f"ERR [{camera_id}] failed posting event after {attempt + 1} attempts: {exc}")
+                return
+            print(
+                f"WARN [{camera_id}] ingestion transport failed: {exc}; "
+                f"retrying in {retry_delay}s"
+            )
+            session.close()
+            time.sleep(retry_delay)
+        except requests.RequestException as exc:
+            detail = ""
+            if getattr(exc, "response", None) is not None:
+                detail = exc.response.text
+            print(f"ERR [{camera_id}] failed posting event: {exc} {detail}")
+            return
 
 
 def resolve_class_ids(model: YOLO, class_names: str) -> List[int]:
@@ -254,10 +281,18 @@ def enhance_infrared(frame):
 
 
 def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_event: threading.Event) -> None:
+    try:
+        validate_local_source(camera_cfg.source)
+    except FileNotFoundError as exc:
+        print(f"ERROR [{camera_cfg.camera_id}] {exc}")
+        stop_event.set()
+        return
+
     calibration = load_zone_calibration(camera_cfg.calibration_file)
     model = YOLO(args.model)
     target_class_ids = resolve_class_ids(model, args.classes)
     class_labels = {class_id: str(model.names[class_id]) for class_id in target_class_ids}
+    session = requests.Session()
     last_post_ts = 0.0
 
     print(
@@ -343,6 +378,7 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
                     )
                     avg_conf = sum(confidences) / len(confidences)
                     post_event(
+                        session=session,
                         api_url=args.api_url,
                         latitude=lat,
                         longitude=lon,
@@ -351,6 +387,8 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
                         source=camera_cfg.source_label,
                         timeout=args.request_timeout,
                         camera_id=camera_cfg.camera_id,
+                        retries=args.request_retries,
+                        retry_delay=args.request_retry_delay,
                     )
                     last_post_ts = now
 
@@ -373,6 +411,7 @@ def run_camera_worker(args: argparse.Namespace, camera_cfg: CameraConfig, stop_e
         finally:
             cap.release()
 
+    session.close()
     if args.display:
         cv2.destroyAllWindows()
 
@@ -401,6 +440,7 @@ def load_camera_configs(args: argparse.Namespace) -> List[CameraConfig]:
     cameras_raw = config_data.get("cameras", [])
     if not cameras_raw:
         raise SystemExit(f"No camera entries found in config: {args.config}")
+    session.close()
 
     cameras: List[CameraConfig] = []
     for idx, item in enumerate(cameras_raw):
@@ -549,6 +589,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help="HTTP timeout (seconds) when posting /ingest events",
+    )
+    parser.add_argument(
+        "--request-retries",
+        type=int,
+        default=2,
+        help="Retries after an ingestion connection failure",
+    )
+    parser.add_argument(
+        "--request-retry-delay",
+        type=float,
+        default=3.0,
+        help="Seconds to wait before retrying an ingestion connection",
     )
     parser.add_argument(
         "--reconnect-delay",

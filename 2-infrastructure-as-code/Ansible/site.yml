@@ -5,7 +5,10 @@
   collections:
     - kubernetes.core
   vars:
+    ansible_python_interpreter: "{{ playbook_dir }}/../../.venv/bin/python"
     kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default('/tmp/project-fosu-kubeconfig', true) }}"
+    terraform_dir: "{{ playbook_dir }}/../Terraform"
+    image_repository: "ceteris90/project-fosu"
     manifest_files:
       - api.yaml
       - dashboard.yaml
@@ -14,23 +17,217 @@
       - dashboard-ingress.yaml
 
   pre_tasks:
+    - name: Read Terraform outputs
+      ansible.builtin.command:
+        argv:
+          - terraform
+          - output
+          - -json
+        chdir: "{{ terraform_dir }}"
+      register: terraform_output
+      changed_when: false
+      no_log: true
+
+    - name: Set infrastructure variables from Terraform outputs
+      ansible.builtin.set_fact:
+        terraform_outputs: "{{ terraform_output.stdout | from_json }}"
+        azure_resource_group: "{{ (terraform_output.stdout | from_json).resource_group_name.value }}"
+        aks_cluster_name: "{{ (terraform_output.stdout | from_json).aks_cluster_name.value }}"
+        image: "{{ image_repository }}:{{ image_tag | default('latest') }}"
+        dashboard_hostname: "{{ (terraform_output.stdout | from_json).dashboard_hostname.value }}"
+        postgres_private_fqdn: "{{ (terraform_output.stdout | from_json).postgres_private_fqdn.value }}"
+
     - name: Require protected application variables
       ansible.builtin.assert:
         that:
-          - database_url is defined
-          - database_url | length > 0
-          - dashboard_username is defined
-          - dashboard_password_hash is defined
           - image is defined
           - image is not search('REPLACE_')
-        fail_msg: "Set protected values in Ansible Vault or pass them with --extra-vars."
+        fail_msg: "Set a valid deployment image before running the playbook."
 
     - name: Require Azure CLI and kubectl
-      ansible.builtin.command: "{{ item }} --version"
+      ansible.builtin.command: "{{ item.command }}"
       changed_when: false
       loop:
-        - az
-        - kubectl
+        - command: az --version
+        - command: kubectl version --client
+        - command: kubelogin --version
+
+    - name: Read PostgreSQL administrator username
+      ansible.builtin.command:
+        argv:
+          - az
+          - postgres
+          - flexible-server
+          - show
+          - --resource-group
+          - "{{ azure_resource_group }}"
+          - --name
+          - "{{ postgres_private_fqdn.split('.')[0] }}"
+          - --query
+          - administratorLogin
+          - --output
+          - tsv
+      register: postgres_admin_username
+      changed_when: false
+
+    - name: Find application Key Vault
+      ansible.builtin.command:
+        argv:
+          - az
+          - keyvault
+          - list
+          - --resource-group
+          - "{{ azure_resource_group }}"
+          - --query
+          - "[0].name"
+          - --output
+          - tsv
+      register: application_key_vault
+      changed_when: false
+
+    - name: Read dashboard username from Key Vault
+      ansible.builtin.command:
+        argv:
+          - az
+          - keyvault
+          - secret
+          - show
+          - --vault-name
+          - "{{ application_key_vault.stdout | trim }}"
+          - --name
+          - dashboard-username
+          - --query
+          - value
+          - --output
+          - tsv
+      register: dashboard_username_secret
+      changed_when: false
+      no_log: true
+
+    - name: Read dashboard password hash from Key Vault
+      ansible.builtin.command:
+        argv:
+          - az
+          - keyvault
+          - secret
+          - show
+          - --vault-name
+          - "{{ application_key_vault.stdout | trim }}"
+          - --name
+          - dashboard-password-hash
+          - --query
+          - value
+          - --output
+          - tsv
+      register: dashboard_password_hash_secret
+      changed_when: false
+      no_log: true
+
+    - name: Set dashboard credentials from Key Vault
+      ansible.builtin.set_fact:
+        dashboard_username: "{{ dashboard_username_secret.stdout | trim }}"
+        dashboard_password_hash: "{{ dashboard_password_hash_secret.stdout | trim }}"
+      no_log: true
+
+    - name: Read PostgreSQL password from Key Vault
+      ansible.builtin.command:
+        argv:
+          - az
+          - keyvault
+          - secret
+          - show
+          - --vault-name
+          - "{{ application_key_vault.stdout | trim }}"
+          - --name
+          - postgres-admin-password
+          - --query
+          - value
+          - --output
+          - tsv
+      register: postgres_admin_password
+      changed_when: false
+      no_log: true
+
+    - name: Build private PostgreSQL connection URL
+      ansible.builtin.set_fact:
+        database_url: >-
+          postgresql+psycopg2://{{ postgres_admin_username.stdout | trim | urlencode }}:{{ postgres_admin_password.stdout | trim | urlencode }}@{{ postgres_private_fqdn }}:5432/fosu?sslmode=require
+      no_log: true
+
+    - name: Read private AKS endpoint metadata
+      ansible.builtin.command:
+        argv:
+          - az
+          - aks
+          - show
+          - --resource-group
+          - "{{ azure_resource_group }}"
+          - --name
+          - "{{ aks_cluster_name }}"
+          - --query
+          - "{node_resource_group:nodeResourceGroup,private_fqdn:privateFqdn}"
+          - --output
+          - json
+      register: aks_endpoint_metadata
+      changed_when: false
+
+    - name: Set private AKS endpoint variables
+      ansible.builtin.set_fact:
+        aks_node_resource_group: "{{ (aks_endpoint_metadata.stdout | from_json).node_resource_group }}"
+        aks_private_fqdn: "{{ (aks_endpoint_metadata.stdout | from_json).private_fqdn }}"
+        aks_private_record_name: "{{ ((aks_endpoint_metadata.stdout | from_json).private_fqdn).split('.')[0] }}"
+        aks_private_zone_name: "{{ ((aks_endpoint_metadata.stdout | from_json).private_fqdn).split('.')[1:] | join('.') }}"
+
+    - name: Resolve private AKS API address from Azure DNS
+      ansible.builtin.command:
+        argv:
+          - az
+          - network
+          - private-dns
+          - record-set
+          - a
+          - show
+          - --resource-group
+          - "{{ aks_node_resource_group }}"
+          - --zone-name
+          - "{{ aks_private_zone_name }}"
+          - --name
+          - "{{ aks_private_record_name }}"
+          - --query
+          - "aRecords[0].ipv4Address"
+          - --output
+          - tsv
+      register: aks_private_ip
+      changed_when: false
+
+    - name: Check route to private AKS API
+      ansible.builtin.command:
+        argv:
+          - ip
+          - route
+          - get
+          - "{{ aks_private_ip.stdout | trim }}"
+      register: aks_private_route
+      changed_when: false
+
+    - name: Require private AKS traffic to use the VPN tunnel
+      ansible.builtin.assert:
+        that:
+          - aks_private_route.stdout is regex(' dev (tun|tap)[^ ]* ')
+        fail_msg: >-
+          Private AKS traffic is not using a VPN tunnel: {{ aks_private_route.stdout | trim }}.
+          Start OpenVPN and wait for "Initialization Sequence Completed" before running Ansible.
+
+    - name: Check private AKS TCP connectivity
+      ansible.builtin.wait_for:
+        host: "{{ aks_private_ip.stdout | trim }}"
+        port: 443
+        connect_timeout: 5
+        timeout: 15
+        state: started
+        msg: >-
+          The VPN route exists, but the private AKS API is not reachable on TCP 443.
+          Refresh the Azure VPN profile and reconnect before retrying Ansible.
 
   tasks:
     - name: Get private AKS credentials
@@ -48,6 +245,31 @@
           - --overwrite-existing
       changed_when: true
       no_log: true
+
+    - name: Configure kubeconfig to use the existing Azure CLI login
+      ansible.builtin.command:
+        argv:
+          - kubelogin
+          - convert-kubeconfig
+          - -l
+          - azurecli
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+      changed_when: true
+      no_log: true
+
+    - name: Configure kubeconfig for private API routing
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - config
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+          - set-cluster
+          - "{{ aks_cluster_name }}"
+          - "--server=https://{{ aks_private_ip.stdout | trim }}:443"
+          - "--tls-server-name={{ aks_private_fqdn }}"
+      changed_when: true
 
     - name: Check private AKS API connectivity
       ansible.builtin.command:

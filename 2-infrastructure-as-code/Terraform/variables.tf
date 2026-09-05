@@ -25,6 +25,12 @@ variable "dashboard_hostname" {
   description = "Public DNS hostname for the dashboard."
 }
 
+variable "deployer_ip_cidr" {
+  type        = string
+  default     = ""
+  description = "Public IP (or CIDR) of the machine running Terraform, allow-listed on the Key Vault firewall so secrets can be written. Remove/tighten after initial deploy."
+}
+
 variable "dashboard_tls_certificate_base64" {
   type        = string
   sensitive   = true

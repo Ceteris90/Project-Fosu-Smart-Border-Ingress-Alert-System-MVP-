@@ -13,13 +13,25 @@ spec:
       labels:
         app: fosu-api
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       nodeSelector:
         project-fosu/workload: application
       containers:
         - name: api
           image: "{{ image }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["uvicorn"]
-          args: ["--app-dir", "1-app-source-code", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          args: ["--app-dir", "1-app-source-code", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "30"]
           ports:
             - name: http
               containerPort: 8000

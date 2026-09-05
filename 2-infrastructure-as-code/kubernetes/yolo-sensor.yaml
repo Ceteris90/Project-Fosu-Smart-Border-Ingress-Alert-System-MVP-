@@ -13,11 +13,23 @@ spec:
       labels:
         app: fosu-yolo-sensor
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       nodeSelector:
         project-fosu/workload: application
       containers:
         - name: yolo-sensor
           image: "{{ image }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           command: ["python"]
           args:
             - 1-app-source-code/scripts/yolo_sensor.py

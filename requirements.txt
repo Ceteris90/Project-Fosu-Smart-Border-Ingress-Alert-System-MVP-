@@ -1,4 +1,5 @@
 fastapi
+ansible-core>=2.16,<2.19
 uvicorn[standard]
 sqlalchemy
 pydantic

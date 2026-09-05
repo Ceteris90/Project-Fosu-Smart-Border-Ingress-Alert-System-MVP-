@@ -5,12 +5,26 @@
 !.env.example
 !.env.template
 **/.streamlit/secrets.toml
+scripts/deployment.config
+**/secrets.yml
+**/secrets.yaml
+**/secrets.json
+!**/secrets.example.yml
+!**/secrets.example.yaml
+!**/secrets.template.yml
+!**/secrets.template.yaml
+!**/app-secrets.template.yaml
 
 # Private keys, certificates, and credential stores
 *.pem
 *.key
 *.p12
 *.pfx
+*.crt
+*.csr
+*.der
+*.srl
+*.b64
 *.jks
 *.keystore
 *.asc
@@ -19,6 +33,12 @@
 *.credentials
 credentials.json
 service-account*.json
+*.ovpn
+*.kubeconfig
+kubeconfig
+.netrc
+.npmrc
+.pypirc
 
 # Python virtual environments and caches
 .venv/
@@ -35,6 +55,7 @@ env/
 htmlcov/
 
 # Local databases, logs, and runtime data
+.local/
 *.db
 *.sqlite
 *.sqlite3
@@ -54,6 +75,7 @@ dist/
 *.tfvars
 *.tfvars.json
 *.tfplan
+tfplan*
 crash.log
 crash.*.log
 .terraformrc
@@ -61,9 +83,13 @@ terraform.rc
 
 # Ansible secret and retry files
 *.vault
+*.vault.yml
 .vault_pass
 .vault-password
 *.retry
+**/inventory.ini
+**/group_vars/all.yml
+2-infrastructure-as-code/Ansible/.collections/
 
 # Docker local overrides
 compose.override.yaml

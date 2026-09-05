@@ -21,7 +21,7 @@ import requests
 from shapely.geometry import shape
 from shapely.ops import substring
 
-API_URL = "http://localhost:8000/ingest"
+DEFAULT_API_URL = "http://localhost:8000/ingest"
 BORDERLINES_PATH = Path(__file__).resolve().parent.parent / "data" / "ghana_borders.geojson"
 
 # Real official checkpoints, used to bias some traffic toward "approved" crossings.
@@ -66,7 +66,7 @@ def random_point_on_border(lines, hotspot_bias=0.3, hotspots=None):
     return lat, lon
 
 
-def send_event(lat, lon, crossing_type_hint=None, timestamp=None, source=None):
+def send_event(api_url, lat, lon, crossing_type_hint=None, timestamp=None, source=None):
     event_source = source or random.choice(["camera", "sensor", "guard"])
     if event_source == "guard":
         crossing_type_hint = "approved"
@@ -84,7 +84,7 @@ def send_event(lat, lon, crossing_type_hint=None, timestamp=None, source=None):
         payload["timestamp"] = timestamp.isoformat() + "Z"
 
     try:
-        r = requests.post(API_URL, json=payload, timeout=5)
+        r = requests.post(api_url, json=payload, timeout=5)
         r.raise_for_status()
         data = r.json()
         print(f"OK  ({lat:.4f},{lon:.4f}) -> {data['crossing_type']:16s} "
@@ -95,7 +95,7 @@ def send_event(lat, lon, crossing_type_hint=None, timestamp=None, source=None):
         print(f"ERR ({lat:.4f},{lon:.4f}): {e} {detail}")
 
 
-def seed_history(n: int, lines, hotspots):
+def seed_history(api_url, n: int, lines, hotspots):
     now = datetime.utcnow()
     for _ in range(n):
         # 25% of traffic goes through official points to simulate legitimate flow
@@ -108,10 +108,10 @@ def seed_history(n: int, lines, hotspots):
             lat, lon = random_point_on_border(lines, hotspots=hotspots)
             crossing_type_hint = "unapproved_route"
         ts = now - timedelta(minutes=random.randint(0, 48 * 60))
-        send_event(lat, lon, crossing_type_hint=crossing_type_hint, timestamp=ts)
+        send_event(api_url, lat, lon, crossing_type_hint=crossing_type_hint, timestamp=ts)
 
 
-def live_loop(interval, lines, hotspots):
+def live_loop(api_url, interval, lines, hotspots):
     print(f"Simulating live sensor pings every {interval}s across the whole border. Ctrl+C to stop.")
     while True:
         if random.random() < 0.25:
@@ -122,7 +122,7 @@ def live_loop(interval, lines, hotspots):
         else:
             lat, lon = random_point_on_border(lines, hotspots=hotspots)
             crossing_type_hint = "unapproved_route"
-        send_event(lat, lon, crossing_type_hint=crossing_type_hint)
+        send_event(api_url, lat, lon, crossing_type_hint=crossing_type_hint)
         time.sleep(interval)
 
 
@@ -131,6 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("--once", action="store_true", help="Bulk-seed historical data then exit")
     parser.add_argument("--n", type=int, default=200, help="Number of events to seed with --once")
     parser.add_argument("--interval", type=float, default=3.0, help="Seconds between live pings")
+    parser.add_argument("--api-url", default=DEFAULT_API_URL, help="API ingestion endpoint")
     args = parser.parse_args()
 
     lines = load_border_lines()
@@ -144,6 +145,6 @@ if __name__ == "__main__":
     ]
 
     if args.once:
-        seed_history(args.n, lines, hotspots)
+        seed_history(args.api_url, args.n, lines, hotspots)
     else:
-        live_loop(args.interval, lines, hotspots)
+        live_loop(args.api_url, args.interval, lines, hotspots)

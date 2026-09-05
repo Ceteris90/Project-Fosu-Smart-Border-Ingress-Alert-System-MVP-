@@ -10,6 +10,10 @@ output "acr_login_server" {
   value = azurerm_container_registry.this.login_server
 }
 
+output "dashboard_hostname" {
+  value = var.dashboard_hostname
+}
+
 output "postgres_private_fqdn" {
   value = azurerm_postgresql_flexible_server.this.fqdn
 }

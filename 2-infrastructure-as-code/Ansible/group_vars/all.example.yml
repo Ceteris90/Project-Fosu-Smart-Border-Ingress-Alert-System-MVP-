@@ -1,10 +1,9 @@
 ---
-azure_resource_group: "rg-fosu-prod"
-aks_cluster_name: "aks-fosu-prod"
-aks_context: "aks-fosu-prod-admin"
+terraform_dir: "{{ playbook_dir }}/../Terraform"
+image_tag: "latest"
+image_repository: "ceteris90/project-fosu"
 
 fosu_namespace: "project-fosu"
-image: "REPLACE_ACR_LOGIN_SERVER/project-fosu:TAG"
 dashboard_hostname: "dashboard.example.gov.gh"
 
 # Keep this file encrypted with ansible-vault after populating it.

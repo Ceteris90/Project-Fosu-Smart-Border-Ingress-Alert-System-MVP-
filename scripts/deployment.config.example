@@ -1,0 +1,16 @@
+# Copy to scripts/deployment.config and change only non-secret deployment values.
+IMAGE_REPOSITORY=ceteris90/project-fosu
+IMAGE_TAG=latest
+K8S_NAMESPACE=project-fosu
+KUBECONFIG_PATH=/tmp/project-fosu-kubeconfig
+TRIVY_SEVERITY=HIGH,CRITICAL
+
+# Optional path to an ignored Ansible Vault password file. When unset, the
+# deployment prompts with --ask-vault-pass.
+# ANSIBLE_VAULT_PASSWORD_FILE=/secure/path/to/vault-password
+
+# Optional operational defaults.
+SKIP_BUILD=false
+SKIP_SCAN=false
+SKIP_TERRAFORM=false
+AUTO_APPROVE=false
