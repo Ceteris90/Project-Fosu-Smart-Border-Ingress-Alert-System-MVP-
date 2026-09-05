@@ -59,10 +59,10 @@ Commands
     preflight   Validate tools, files, Azure login, and configuration
     local       Build and start the Docker Compose stack
     build       Build the application image
-    scan        Run Trivy source and image scans
+    scan        Pull the image and run Trivy image and source scans
     infra       Initialize, validate, plan, and apply Terraform
-    app         Push the image and deploy workloads to AKS with Ansible
-    deploy      Run preflight, build, scan, Terraform, and AKS deployment
+    app         Build, push, pull, scan, and deploy with Ansible
+    deploy      Build/push, provision, pull/scan, configure, and deploy
     status      Show local and AKS deployment status
     destroy     Destroy Azure infrastructure (requires --confirm-destroy)
     down        Stop the local Docker Compose stack without deleting volumes
@@ -289,7 +289,7 @@ scan_source() {
 scan_image() {
     require_command trivy
     if [[ "${DRY_RUN}" != "true" ]] && ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-        die "Image ${IMAGE} does not exist; run the build command first"
+        die "Image ${IMAGE} does not exist; pull it from the registry first"
     fi
     run trivy image \
         --scanners vuln \
@@ -305,15 +305,21 @@ scan_all() {
         warn "Skipping Trivy scans"
         return 0
     fi
-    section "Trivy source scan"
-    scan_source
+    pull_image
     section "Trivy image scan"
     scan_image
+    section "Trivy source scan"
+    scan_source
 }
 
 push_image() {
     section "Push image"
     run docker push "${IMAGE}"
+}
+
+pull_image() {
+    section "Pull image from registry"
+    run docker pull "${IMAGE}"
 }
 
 provision_infrastructure() {
@@ -334,7 +340,7 @@ provision_infrastructure() {
 }
 
 deploy_application() {
-    section "Deploy application to private AKS"
+    section "Configure infrastructure and deploy application"
     require_command ansible-playbook
     require_file "${ANSIBLE_INVENTORY}"
     export KUBECONFIG="${KUBECONFIG_PATH}"
@@ -365,9 +371,9 @@ deploy_application() {
 deploy_cloud() {
     preflight
     build_image
-    scan_all
     push_image
     provision_infrastructure
+    scan_all
     deploy_application
     show_status
 }
@@ -494,7 +500,7 @@ case "${COMMAND:-deploy}" in
     build) build_image ;;
     scan) scan_all ;;
     infra) preflight; provision_infrastructure ;;
-    app) preflight; build_image; scan_all; push_image; deploy_application; show_status ;;
+    app) preflight; build_image; push_image; scan_all; deploy_application; show_status ;;
     deploy) deploy_cloud ;;
     status) show_status ;;
     destroy) destroy_infrastructure ;;

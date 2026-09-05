@@ -19,10 +19,11 @@ scripts/deploy.sh deploy
 scripts/deploy.sh status
 ```
 
-The full cloud deployment builds and scans the image, pushes it, applies
-Terraform, and runs the Ansible deployment against private AKS. Connect the
-Azure VPN before the Ansible phase. Ansible prompts for the Vault password by
-default; automation can set `ANSIBLE_VAULT_PASSWORD_FILE` to a protected file.
+The full cloud deployment builds and pushes the image, applies Terraform,
+pulls and scans the registry image, and then uses Ansible to configure the
+infrastructure and deploy to private AKS. Connect the Azure VPN before the
+Ansible phase. Ansible prompts for the Vault password by default; automation
+can set `ANSIBLE_VAULT_PASSWORD_FILE` to a protected file.
 Individual phases are available as `build`, `scan`, `infra`, and `app`; use
 `scripts/deploy.sh --help` for all options. Azure teardown is deliberately
 guarded and requires `--confirm-destroy`.
