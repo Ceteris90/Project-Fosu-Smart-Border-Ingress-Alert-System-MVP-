@@ -27,7 +27,7 @@ jobs:
           fetch-depth: 0
 
       - name: Scan repository with Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: .
@@ -57,7 +57,7 @@ jobs:
           tags: project-fosu:${{ github.sha }}
 
       - name: Scan application image with Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: project-fosu:${{ github.sha }}
           format: table
