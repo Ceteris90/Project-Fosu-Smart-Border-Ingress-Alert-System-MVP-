@@ -49,6 +49,11 @@ scripts/
 sonar-project.properties
 README.md
 
+# Model weights: yolov8n.pt is the runtime default and stays in the image.
+# yolov8s.pt is only used for local (non-container) testing; keep it out of the
+# build context. Ultralytics downloads it on demand if ever needed at runtime.
+yolov8s.pt
+
 # Python environments, caches, tests, and build output
 .venv/
 venv/

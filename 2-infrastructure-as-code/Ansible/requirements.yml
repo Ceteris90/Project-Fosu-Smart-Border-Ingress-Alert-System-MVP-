@@ -1,6 +1,6 @@
 ---
 collections:
+  # site.yml drives Azure through the `az` CLI (ansible.builtin.command), so the
+  # heavy azure.azcollection (and its Python SDK tree) is not required.
   - name: kubernetes.core
     version: ">=5.0.0,<6.0.0"
-  - name: azure.azcollection
-    version: ">=4.0.0,<5.0.0"

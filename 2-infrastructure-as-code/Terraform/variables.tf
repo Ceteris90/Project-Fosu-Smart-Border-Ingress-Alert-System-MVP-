@@ -16,8 +16,32 @@ variable "name_prefix" {
 }
 
 variable "environment" {
+  type    = string
+  default = "prod"
+}
+
+variable "kubernetes_version" {
   type        = string
-  default     = "prod"
+  default     = null
+  description = "AKS control-plane version. Null lets Azure use the current default supported version. Pin only after checking `az aks get-versions`."
+}
+
+variable "aks_admin_group_object_ids" {
+  type        = list(string)
+  default     = []
+  description = "Entra ID group object IDs granted cluster-admin via AKS-managed AAD RBAC. Empty means only principals with an explicit 'Azure Kubernetes Service RBAC Cluster Admin' assignment (e.g. the deployer) can administer the cluster."
+}
+
+variable "waf_max_request_body_size_in_kb" {
+  type        = number
+  default     = 2000
+  description = "Application Gateway WAF_v2 max request body size (KB). Range 8-2000; the 128 KB default is often too small for dashboard POSTs."
+}
+
+variable "waf_file_upload_limit_in_mb" {
+  type        = number
+  default     = 100
+  description = "Application Gateway WAF_v2 file upload limit (MB)."
 }
 
 variable "dashboard_hostname" {
@@ -55,6 +79,36 @@ variable "postgres_admin_password" {
   description = "Use TF_VAR_postgres_admin_password or a CI secret."
 }
 
+variable "postgres_sku_name" {
+  type        = string
+  default     = "GP_Standard_D2ds_v5"
+  description = "PostgreSQL Flexible Server SKU. Use a B-series (e.g. B_Standard_B1ms) for cheap non-production environments."
+}
+
+variable "postgres_storage_mb" {
+  type        = number
+  default     = 32768
+  description = "PostgreSQL Flexible Server storage in MB."
+}
+
+variable "postgres_high_availability_enabled" {
+  type        = bool
+  default     = true
+  description = "Enable zone-redundant HA (roughly doubles compute cost). Disable for non-production."
+}
+
+variable "postgres_geo_redundant_backup_enabled" {
+  type        = bool
+  default     = true
+  description = "Enable geo-redundant backups. Disable for non-production."
+}
+
+variable "postgres_backup_retention_days" {
+  type        = number
+  default     = 14
+  description = "PostgreSQL backup retention in days (7-35)."
+}
+
 variable "dashboard_username" {
   type    = string
   default = "fosu.admin"
@@ -67,8 +121,8 @@ variable "dashboard_password_hash" {
 }
 
 variable "vpn_client_address_pool" {
-  type        = list(string)
-  default     = ["172.30.0.0/24"]
+  type    = list(string)
+  default = ["172.30.0.0/24"]
 }
 
 variable "vpn_root_certificate_data" {

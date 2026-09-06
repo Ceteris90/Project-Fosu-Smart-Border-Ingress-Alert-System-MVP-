@@ -1,5 +1,9 @@
 fastapi
 ansible-core>=2.16,<2.19
+# Runtime deps for the Ansible kubernetes.core collection used by
+# 2-infrastructure-as-code/Ansible/site.yml.
+kubernetes>=28
+pyyaml
 uvicorn[standard]
 sqlalchemy
 pydantic

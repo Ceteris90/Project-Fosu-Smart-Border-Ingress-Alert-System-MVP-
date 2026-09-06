@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fosu-yolo-sensor
-  namespace: project-fosu
+  namespace: "{{ fosu_namespace }}"
 spec:
   replicas: 1
   selector:
@@ -25,6 +25,7 @@ spec:
       containers:
         - name: yolo-sensor
           image: "{{ image }}"
+          imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:

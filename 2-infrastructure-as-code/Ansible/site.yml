@@ -14,9 +14,23 @@
       - dashboard.yaml
       - yolo-sensor.yaml
       - api-network-policy.yaml
+      - yolo-sensor-network-policy.yaml
       - dashboard-ingress.yaml
 
   pre_tasks:
+    - name: Apply deployment defaults when not set by inventory or extra vars
+      ansible.builtin.set_fact:
+        fosu_namespace: "{{ fosu_namespace | default('project-fosu', true) }}"
+        image_tag: "{{ image_tag | default('latest', true) }}"
+        kubernetes_manifest_dir: "{{ kubernetes_manifest_dir | default(playbook_dir ~ '/../kubernetes', true) }}"
+
+    - name: Ensure the Terraform working directory is initialized
+      ansible.builtin.command:
+        cmd: terraform init -input=false -no-color
+        chdir: "{{ terraform_dir }}"
+        creates: "{{ terraform_dir }}/.terraform"
+      changed_when: false
+
     - name: Read Terraform outputs
       ansible.builtin.command:
         argv:
@@ -327,6 +341,42 @@
         state: present
         src: "{{ item.dest }}"
       loop: "{{ rendered_manifests.results }}"
+
+    - name: Roll Deployments when the image tag is mutable
+      # A re-pushed ":latest" leaves the manifest unchanged, so "kubectl apply"
+      # is a no-op and no new pods are created. Force a rollout in that case.
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+          - --namespace
+          - "{{ fosu_namespace }}"
+          - rollout
+          - restart
+          - deployment/fosu-api
+          - deployment/fosu-dashboard
+          - deployment/fosu-yolo-sensor
+      when: image_tag == 'latest'
+      changed_when: true
+
+    - name: Wait for rolled Deployments to finish updating
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+          - --namespace
+          - "{{ fosu_namespace }}"
+          - rollout
+          - status
+          - "deployment/{{ item }}"
+          - --timeout=600s
+      loop:
+        - fosu-api
+        - fosu-dashboard
+      when: image_tag == 'latest'
+      changed_when: false
 
     - name: Wait for API deployment
       kubernetes.core.k8s_info:

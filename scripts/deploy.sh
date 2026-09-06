@@ -37,7 +37,11 @@ IMAGE_TAG="${IMAGE_TAG:-latest}"
 IMAGE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 K8S_NAMESPACE="${K8S_NAMESPACE:-project-fosu}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-/tmp/project-fosu-kubeconfig}"
-ANSIBLE_INVENTORY="${ANSIBLE_INVENTORY:-${ANSIBLE_DIR}/inventory.ini}"
+DEFAULT_ANSIBLE_INVENTORY="${ANSIBLE_DIR}/inventory.ini"
+if [[ ! -f "${DEFAULT_ANSIBLE_INVENTORY}" ]]; then
+    DEFAULT_ANSIBLE_INVENTORY="${ANSIBLE_DIR}/inventory.ini.example"
+fi
+ANSIBLE_INVENTORY="${ANSIBLE_INVENTORY:-${DEFAULT_ANSIBLE_INVENTORY}}"
 TRIVY_SEVERITY="${TRIVY_SEVERITY:-HIGH,CRITICAL}"
 LOG_FILE="${LOG_FILE:-${PROJECT_ROOT}/.local/logs/deploy.log}"
 
@@ -300,16 +304,37 @@ scan_image() {
         "${IMAGE}"
 }
 
+_trivy_scans() {
+    section "Trivy image scan"
+    scan_image
+    section "Trivy source scan"
+    scan_source
+}
+
+# Scan the image that is already present locally (built earlier in the flow),
+# pulling only if it is missing. Used before the registry push so a failing
+# vulnerability gate stops the pipeline before the image is published.
+run_scans() {
+    if [[ "${SKIP_SCAN}" == "true" ]]; then
+        warn "Skipping Trivy scans"
+        return 0
+    fi
+    if [[ "${DRY_RUN}" != "true" ]] && ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+        warn "Local image ${IMAGE} not found; pulling before scan"
+        pull_image
+    fi
+    _trivy_scans
+}
+
+# Always pull the registry image first, then scan. Used by the standalone
+# `scan` command to assess what is currently published.
 scan_all() {
     if [[ "${SKIP_SCAN}" == "true" ]]; then
         warn "Skipping Trivy scans"
         return 0
     fi
     pull_image
-    section "Trivy image scan"
-    scan_image
-    section "Trivy source scan"
-    scan_source
+    _trivy_scans
 }
 
 push_image() {
@@ -337,6 +362,8 @@ provision_infrastructure() {
     else
         run terraform -chdir="${TERRAFORM_DIR}" apply tfplan
     fi
+    # The plan file can contain sensitive values in cleartext; drop it once applied.
+    [[ "${DRY_RUN}" == "true" ]] || rm -f "${TERRAFORM_DIR}/tfplan"
 }
 
 deploy_application() {
@@ -344,6 +371,7 @@ deploy_application() {
     require_command ansible-playbook
     require_file "${ANSIBLE_INVENTORY}"
     export KUBECONFIG="${KUBECONFIG_PATH}"
+    local _first_line=""
     local -a ansible_command=(
         ansible-playbook
         -i "${ANSIBLE_INVENTORY}"
@@ -356,7 +384,9 @@ deploy_application() {
     if [[ -n "${ANSIBLE_VAULT_PASSWORD_FILE:-}" ]]; then
         require_file "${ANSIBLE_VAULT_PASSWORD_FILE}"
         ansible_command+=(--vault-password-file "${ANSIBLE_VAULT_PASSWORD_FILE}")
-    else
+    elif [[ -f "${ANSIBLE_DIR}/group_vars/all.yml" ]] && \
+        IFS= read -r _first_line < "${ANSIBLE_DIR}/group_vars/all.yml" && \
+        [[ "${_first_line}" == "\$ANSIBLE_VAULT;"* ]]; then
         ansible_command+=(--ask-vault-pass)
     fi
 
@@ -368,12 +398,19 @@ deploy_application() {
     "${ansible_command[@]}"
 }
 
+require_vpn() {
+    if ! ip -o link show up 2>/dev/null | grep -Eq '^[0-9]+: (tun|tap)[^:]*:'; then
+        die "No active VPN tunnel. For a first deployment, run 'infra', refresh and connect the VPN, then run 'app'."
+    fi
+}
+
 deploy_cloud() {
+    require_vpn
     preflight
     build_image
+    run_scans
     push_image
     provision_infrastructure
-    scan_all
     deploy_application
     show_status
 }
@@ -412,7 +449,7 @@ show_aks_status() {
     fi
 
     table_header '26 8 10 6' "DEPLOYMENT" "READY" "AVAILABLE" "AGE"
-    while read -r name ready updated available age; do
+    while read -r name ready _ available age; do
         table_row '26 8 10 6' "${name}" "${ready}" "${available}" "${age}"
     done < <(kubectl --request-timeout=5s --kubeconfig "${KUBECONFIG_PATH}" -n "${K8S_NAMESPACE}" get deployments --no-headers)
     table_end '26 8 10 6'
@@ -461,6 +498,9 @@ stop_local() {
 destroy_infrastructure() {
     [[ "${CONFIRM_DESTROY}" == "true" ]] || die "Refusing to destroy Azure resources without --confirm-destroy"
     section "Destroy Azure infrastructure"
+    warn "The VPN gateway has lifecycle.prevent_destroy set; Terraform will refuse"
+    warn "to delete it. To tear everything down, temporarily remove that block in"
+    warn "2-infrastructure-as-code/Terraform/main.tf (see README) and re-run."
     prepare_terraform_environment
     if [[ "${AUTO_APPROVE}" == "true" ]]; then
         run terraform -chdir="${TERRAFORM_DIR}" destroy -auto-approve
@@ -500,7 +540,7 @@ case "${COMMAND:-deploy}" in
     build) build_image ;;
     scan) scan_all ;;
     infra) preflight; provision_infrastructure ;;
-    app) preflight; build_image; push_image; scan_all; deploy_application; show_status ;;
+    app) require_vpn; preflight; build_image; run_scans; push_image; deploy_application; show_status ;;
     deploy) deploy_cloud ;;
     status) show_status ;;
     destroy) destroy_infrastructure ;;

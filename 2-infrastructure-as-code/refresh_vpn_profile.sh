@@ -12,6 +12,10 @@ python_bin="$repo_root/.venv/bin/python"
 [[ -s "$client_cert" ]] || { echo "Missing VPN client certificate: $client_cert" >&2; exit 1; }
 [[ -s "$client_key" ]] || { echo "Missing VPN client key: $client_key" >&2; exit 1; }
 
+if [[ ! -d "$terraform_dir/.terraform" ]]; then
+	terraform -chdir="$terraform_dir" init -input=false -no-color >/dev/null
+fi
+
 resource_group="$(terraform -chdir="$terraform_dir" output -raw resource_group_name)"
 mapfile -t gateways < <(az network vnet-gateway list \
 	--resource-group "$resource_group" \

@@ -1,10 +1,166 @@
-# Project-Fosu-Smart-Border-Ingress-Alert-System-MVP-
+# Project Fosu Smart Border Ingress Alert System (MVP)
 A prototype border-crossing logging, mapping, and threshold-alert system that covers **the whole border**, not just a handful of named checkpoints.
 
-Azure AKS/VPN/private-database deployment files are under
-`2-infrastructure-as-code`; their operating instructions are included here.
+## Deployment options
 
-## Central deployment script
+Choose the deployment path that matches your environment:
+
+1. **Local deployment** runs the API, dashboard, and sensor services on one
+	machine with Docker Compose. Use this path for development and demonstrations.
+2. **Azure deployment** provisions the production-style AKS, VPN, database,
+	registry, and networking infrastructure. Use this path for a cloud deployment.
+
+## Section 1: Local deployment
+
+### Prerequisites
+
+- Docker with the Compose plugin
+- Git
+- Python 3 with `venv` and `pip`
+
+### Configure local credentials
+
+From the repository root, run:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 1-app-source-code/scripts/set_dashboard_password.py --username fosu.admin
+cp scripts/deployment.config.example scripts/deployment.config
+```
+
+The password command creates an ignored `.env` file containing the dashboard
+username and a one-way password hash. It does not store the plain-text password.
+
+### Start the application
+
+```bash
+scripts/deploy.sh local
+```
+
+After the containers start, open:
+
+- Dashboard: `http://localhost:8501`
+- API documentation: `http://localhost:8000/docs`
+
+Check the deployment status or stop it with:
+
+```bash
+scripts/deploy.sh status
+scripts/deploy.sh down
+```
+
+See [Local development and sensor testing](#local-development-and-sensor-testing)
+for manual startup, mock sensor, YOLO, infrared, and multi-camera instructions.
+
+## Section 2: Azure deployment
+
+Azure AKS, VPN, and private-database deployment files are under
+`2-infrastructure-as-code`.
+
+### Prerequisites
+
+- An Azure account with permission to create the required resources
+- Azure CLI authenticated with `az login`
+- Docker
+- Terraform 1.6 or newer
+- `kubectl` and `kubelogin`
+- Ansible and the dependencies in `requirements.txt`
+- Access to the Terraform state storage account described below
+- A globally unique dashboard DNS name and a TLS certificate
+
+### Deploy to Azure
+
+First, create the non-secret deployment configuration and install the Python
+and Ansible dependencies:
+
+```bash
+cp scripts/deployment.config.example scripts/deployment.config
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+ansible-galaxy collection install \
+	-r 2-infrastructure-as-code/Ansible/requirements.yml \
+	-p 2-infrastructure-as-code/Ansible/.collections
+```
+
+The deployment script uses the committed `inventory.ini.example` automatically.
+To customize the inventory, copy it to the ignored local path before deployment:
+
+```bash
+cp 2-infrastructure-as-code/Ansible/inventory.ini.example \
+	2-infrastructure-as-code/Ansible/inventory.ini
+```
+
+Before running preflight, provide these required Terraform values in the
+ignored `2-infrastructure-as-code/Terraform/terraform.tfvars` file or through
+matching `TF_VAR_*` environment variables:
+
+- `subscription_id`
+- `dashboard_hostname`
+- `dashboard_tls_certificate_password`
+- `postgres_admin_password`
+- `dashboard_password_hash`
+- `vpn_root_certificate_data`
+
+Also provide `dashboard_tls_certificate_base64`, or place a non-empty
+`dashboard.pfx` in `2-infrastructure-as-code/Terraform/` so the deployment
+script can encode it automatically. Set `deployer_ip_cidr` to the public IP or
+CIDR that must access Key Vault during initial deployment.
+
+For a development deployment, generate a one-year self-signed dashboard
+certificate, VPN certificates, random infrastructure passwords, and the ignored
+Terraform variable file after configuring the dashboard password:
+
+```bash
+scripts/bootstrap_azure.sh fosu-dashboard-n9gsl.eastus2.cloudapp.azure.com
+```
+
+The generated dashboard certificate is suitable for testing but causes browser
+trust warnings. Replace it with a certificate issued by a trusted authority for
+production.
+
+The detailed certificate, Terraform, VPN, and Ansible preparation steps are in
+[Azure infrastructure details](#azure-infrastructure-details).
+
+For the first deployment, provision the infrastructure before connecting to the
+new private network:
+
+```bash
+scripts/deploy.sh preflight
+scripts/deploy.sh infra
+./2-infrastructure-as-code/refresh_vpn_profile.sh
+sudo openvpn --config .local/vpn/OpenVPN/vpnconfig.ovpn
+```
+
+Wait for `Initialization Sequence Completed` and leave OpenVPN running. In a
+second terminal, deploy the application and check its status:
+
+```bash
+source .venv/bin/activate
+scripts/deploy.sh app
+scripts/deploy.sh status
+```
+
+For later updates, while the VPN is already connected, `scripts/deploy.sh deploy`
+runs the build, Terraform, scanning, and Ansible phases together. The command
+refuses to start without an active VPN tunnel so it cannot provision resources
+and then fail when private AKS access is required. Ansible prompts for the Vault
+password only when protected local Ansible variables are used.
+
+### Remove the Azure deployment
+
+Azure teardown is deliberately guarded because it destroys cloud resources:
+
+```bash
+scripts/deploy.sh destroy --confirm-destroy
+```
+
+Review the Terraform plan and confirm that retained resources, including the
+VPN gateway, are handled as intended before approving destruction.
+
+## Deployment command reference
 
 Use `scripts/deploy.sh` as the single entry point for local and Azure
 deployments. Optional non-secret defaults can be copied from
@@ -28,21 +184,31 @@ Individual phases are available as `build`, `scan`, `infra`, and `app`; use
 `scripts/deploy.sh --help` for all options. Azure teardown is deliberately
 guarded and requires `--confirm-destroy`.
 
-## Azure infrastructure
+## Azure infrastructure details
 
 Terraform provisions the Project Fosu Azure foundation:
 
 - zone-spread AKS system and user node pools in a VNet;
-- a public Application Gateway for the dashboard only;
+- a public Application Gateway (WAF_v2) for the dashboard only;
 - an internal API service and YOLO workers inside AKS;
 - private Azure Database for PostgreSQL Flexible Server;
 - Azure Key Vault for dashboard and database secrets;
-- Azure Container Registry; and
+- Log Analytics with diagnostic settings for the gateway, Key Vault, and
+	database; and
 - Point-to-site Azure VPN Gateway for camera and operator access.
+
+The application image is pulled from the public registry named by
+`IMAGE_REPOSITORY` (Docker Hub by default), so no Azure Container Registry is
+provisioned; see the note in `Terraform/main.tf` to add a private ACR.
 
 The default region is `eastus2`, with availability zones `1`, `2`, and `3`.
 Operators need Azure CLI authentication, Terraform 1.6 or newer, permission to
 create these Azure resources, and a globally unique dashboard DNS name.
+
+Cost-sensitive non-production environments can override `postgres_sku_name`,
+`postgres_high_availability_enabled`, `postgres_geo_redundant_backup_enabled`,
+and related variables (see `Terraform/variables.tf`); the defaults keep the
+production posture.
 
 ### Terraform state and deployment
 
@@ -107,8 +273,8 @@ ansible-galaxy collection install \
 	-p 2-infrastructure-as-code/Ansible/.collections
 ```
 
-For a new machine, create local configuration from the committed examples and
-encrypt the populated variable file:
+For a custom inventory, copy the committed example. If local Ansible variables
+are required, copy and populate the example variable file, then encrypt it:
 
 ```bash
 cd 2-infrastructure-as-code/Ansible
@@ -149,7 +315,9 @@ docker push ceteris90/project-fosu:latest
 docker manifest inspect ceteris90/project-fosu:latest >/dev/null
 ```
 
-## Run locally
+## Local development and sensor testing
+
+### Run services without Docker
 
 ```bash
 source .venv/bin/activate
@@ -159,7 +327,7 @@ streamlit run 1-app-source-code/dashboard/dashboard.py
 
 Open `http://localhost:8501`. The dashboard is protected by a session login and does not request operational API data until authentication succeeds.
 
-## Replace mock sensor with YOLO detection
+### Replace mock sensor with YOLO detection
 
 You can feed live detections from a camera/video stream into the same existing ingestion logic (no backend changes required):
 
@@ -180,7 +348,7 @@ Notes:
 - The script sends the same payload shape used by `mock_sensor.py` to `/ingest`.
 - Keep `uvicorn` running first so YOLO events can be recorded and visualized on the dashboard.
 
-### Switch sensors during a demonstration
+#### Switch sensors during a demonstration
 
 Keep the API and dashboard running in separate terminals:
 
@@ -285,7 +453,7 @@ Stop YOLO with `q` in the preview window or `Ctrl+C` in its terminal before
 switching back to `mock_sensor.py`. Both sensors send events to the same
 `/ingest` endpoint, so new detections appear in the dashboard automatically.
 
-### Lightweight infrared night detection
+#### Lightweight infrared night detection
 
 Use an IR-capable USB or RTSP camera with the lightweight YOLO model. The
 `--infrared` option enhances monochrome IR frames and converts them to the
@@ -308,7 +476,7 @@ slower CPU inference. A thermal camera requires a model trained or fine-tuned
 on thermal imagery; ordinary YOLO weights may not detect thermal silhouettes
 reliably.
 
-### Multi-camera mode (one process)
+#### Multi-camera mode (one process)
 
 Use the JSON camera list (one worker thread per enabled camera):
 
@@ -320,7 +488,7 @@ python 1-app-source-code/scripts/yolo_sensor.py \
 Each camera entry can define its own `source`, geolocation, confidence threshold,
 post interval, and optional calibration file.
 
-### Zone calibration for better geolocation
+#### Zone calibration for better geolocation
 
 To map pixel regions to more realistic geo locations, provide a calibration file
 for each camera (example: `1-app-source-code/scripts/calibration.example.json`).
@@ -344,7 +512,7 @@ Calibration format:
 If a detection center falls inside a zone, coordinates are projected using that
 zone mapping. If no zone matches, the script falls back to lat/lon span mapping.
 
-## Run with Docker
+### Docker Compose reference
 
 Build and start the API and dashboard with Compose:
 

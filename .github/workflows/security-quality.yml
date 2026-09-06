@@ -12,7 +12,35 @@ permissions:
   contents: read
   security-events: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  iac:
+    name: IaC and shell checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive 2-infrastructure-as-code/Terraform
+
+      - name: Terraform validate
+        working-directory: 2-infrastructure-as-code/Terraform
+        run: |
+          terraform init -backend=false -input=false -no-color
+          terraform validate -no-color
+
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh 2-infrastructure-as-code/*.sh
+
   analyze:
     name: SonarQube and Trivy
     runs-on: ubuntu-latest
@@ -55,6 +83,8 @@ jobs:
           load: true
           push: false
           tags: project-fosu:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Scan application image with Trivy
         uses: aquasecurity/trivy-action@0.35.0

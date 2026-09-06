@@ -75,11 +75,13 @@ resource "azurerm_web_application_firewall_policy" "this" {
   resource_group_name = azurerm_resource_group.this.name
 
   policy_settings {
-    enabled                     = true
-    mode                        = "Prevention"
-    request_body_check          = true
-    file_upload_limit_in_mb     = 100
-    max_request_body_size_in_kb = 128
+    enabled            = true
+    mode               = "Prevention"
+    request_body_check = true
+    # 128 KB (the WAF_v2 default) is too small for the Streamlit dashboard's
+    # form/upload POSTs; raise toward the WAF_v2 maximum of 2000 KB.
+    file_upload_limit_in_mb     = var.waf_file_upload_limit_in_mb
+    max_request_body_size_in_kb = var.waf_max_request_body_size_in_kb
   }
 
   managed_rules {
@@ -180,11 +182,13 @@ resource "azurerm_application_gateway" "this" {
 }
 
 resource "azurerm_kubernetes_cluster" "this" {
-  name                    = "aks-${local.name}"
-  location                = azurerm_resource_group.this.location
-  resource_group_name     = azurerm_resource_group.this.name
-  dns_prefix              = "aks-${var.name_prefix}-${random_string.suffix.result}"
-  kubernetes_version      = "1.35"
+  name                = "aks-${local.name}"
+  location            = azurerm_resource_group.this.location
+  resource_group_name = azurerm_resource_group.this.name
+  dns_prefix          = "aks-${var.name_prefix}-${random_string.suffix.result}"
+  # Leave null to let AKS pick the current default supported version. Pin a
+  # value only after confirming it with `az aks get-versions --location <region>`.
+  kubernetes_version      = var.kubernetes_version
   sku_tier                = "Standard"
   private_cluster_enabled = true
 
@@ -201,7 +205,7 @@ resource "azurerm_kubernetes_cluster" "this" {
     only_critical_addons_enabled = true
 
     upgrade_settings {
-      drain_timeout_in_minutes      = 0
+      drain_timeout_in_minutes      = 30
       max_surge                     = "10%"
       node_soak_duration_in_minutes = 0
     }
@@ -235,7 +239,7 @@ resource "azurerm_kubernetes_cluster" "this" {
   azure_active_directory_role_based_access_control {
     tenant_id              = data.azurerm_client_config.current.tenant_id
     azure_rbac_enabled     = true
-    admin_group_object_ids = []
+    admin_group_object_ids = var.aks_admin_group_object_ids
   }
 
   oms_agent {
@@ -260,7 +264,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "workload" {
   }
 
   upgrade_settings {
-    drain_timeout_in_minutes      = 0
+    drain_timeout_in_minutes      = 30
     max_surge                     = "10%"
     node_soak_duration_in_minutes = 0
   }
@@ -268,21 +272,14 @@ resource "azurerm_kubernetes_cluster_node_pool" "workload" {
   tags = local.tags
 }
 
-resource "azurerm_container_registry" "this" {
-  name                    = replace("acr${var.name_prefix}${var.environment}${random_string.suffix.result}", "-", "")
-  resource_group_name     = azurerm_resource_group.this.name
-  location                = azurerm_resource_group.this.location
-  sku                     = "Premium"
-  admin_enabled           = false
-  zone_redundancy_enabled = true
-  tags                    = local.tags
-}
-
-resource "azurerm_role_assignment" "aks_acr_pull" {
-  scope                = azurerm_container_registry.this.id
-  role_definition_name = "AcrPull"
-  principal_id         = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id
-}
+# NOTE: The deployment pipeline (scripts/deploy.sh + Ansible + the Kubernetes
+# manifests) builds and pulls the application image from the public registry set
+# by IMAGE_REPOSITORY (Docker Hub `ceteris90/project-fosu` by default). No Azure
+# Container Registry was in that path, so the previously provisioned Premium ACR
+# and its AcrPull role assignment have been removed. To use a private ACR
+# instead, re-add an `azurerm_container_registry` + `AcrPull` assignment for
+# `kubelet_identity[0].object_id`, then point IMAGE_REPOSITORY / image_repository
+# at `<acr>.azurecr.io/project-fosu`.
 
 resource "azurerm_role_assignment" "aks_network_contributor" {
   scope                = azurerm_virtual_network.this.id
@@ -321,6 +318,50 @@ resource "azurerm_log_analytics_workspace" "this" {
   sku                 = "PerGB2018"
   retention_in_days   = 30
   tags                = local.tags
+}
+
+# Ship platform logs/metrics for the internet-facing and secret-holding
+# resources to Log Analytics (the AKS oms_agent only covers the cluster).
+resource "azurerm_monitor_diagnostic_setting" "application_gateway" {
+  name                       = "diag-agw"
+  target_resource_id         = azurerm_application_gateway.this.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
+
+  enabled_log {
+    category_group = "allLogs"
+  }
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
+}
+
+resource "azurerm_monitor_diagnostic_setting" "key_vault" {
+  name                       = "diag-kv"
+  target_resource_id         = azurerm_key_vault.this.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
+
+  enabled_log {
+    category_group = "allLogs"
+  }
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
+}
+
+resource "azurerm_monitor_diagnostic_setting" "postgres" {
+  name                       = "diag-psql"
+  target_resource_id         = azurerm_postgresql_flexible_server.this.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
+
+  enabled_log {
+    category_group = "allLogs"
+  }
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
 }
 
 resource "azurerm_key_vault" "this" {
@@ -416,15 +457,23 @@ resource "azurerm_postgresql_flexible_server" "this" {
   public_network_access_enabled = false
   administrator_login           = var.postgres_admin_username
   administrator_password        = var.postgres_admin_password
-  storage_mb                    = 32768
-  sku_name                      = "GP_Standard_D2ds_v5"
+  storage_mb                    = var.postgres_storage_mb
+  sku_name                      = var.postgres_sku_name
   zone                          = "1"
-  high_availability {
-    mode                      = "ZoneRedundant"
-    standby_availability_zone = "2"
+
+  # High availability, geo-redundant backup, and the GP SKU are the biggest cost
+  # drivers here. Defaults preserve the production posture; override the
+  # variables for cheaper non-production environments.
+  dynamic "high_availability" {
+    for_each = var.postgres_high_availability_enabled ? [1] : []
+    content {
+      mode                      = "ZoneRedundant"
+      standby_availability_zone = "2"
+    }
   }
-  backup_retention_days        = 14
-  geo_redundant_backup_enabled = true
+
+  backup_retention_days        = var.postgres_backup_retention_days
+  geo_redundant_backup_enabled = var.postgres_geo_redundant_backup_enabled
   tags                         = local.tags
 
   depends_on = [azurerm_private_dns_zone_virtual_network_link.postgres]

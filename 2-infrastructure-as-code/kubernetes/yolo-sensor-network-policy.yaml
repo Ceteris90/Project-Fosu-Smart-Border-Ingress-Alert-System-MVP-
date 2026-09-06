@@ -1,0 +1,14 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fosu-yolo-sensor-no-ingress
+  namespace: "{{ fosu_namespace }}"
+spec:
+  # The YOLO sensor is an outbound-only client (it POSTs detections to the API).
+  # Nothing should connect to it, so deny all ingress.
+  podSelector:
+    matchLabels:
+      app: fosu-yolo-sensor
+  policyTypes:
+    - Ingress
+  ingress: []

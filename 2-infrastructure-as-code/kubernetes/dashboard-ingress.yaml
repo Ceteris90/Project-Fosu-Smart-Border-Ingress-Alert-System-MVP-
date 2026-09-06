@@ -2,13 +2,16 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: fosu-dashboard
-  namespace: project-fosu
+  namespace: "{{ fosu_namespace }}"
   annotations:
     kubernetes.io/ingress.class: azure/application-gateway
     appgw.ingress.kubernetes.io/backend-path-prefix: "/"
     appgw.ingress.kubernetes.io/health-probe-path: /_stcore/health
     appgw.ingress.kubernetes.io/appgw-ssl-certificate: dashboard-tls
     appgw.ingress.kubernetes.io/ssl-redirect: "true"
+    # Streamlit keeps per-session state in the server process; pin each client
+    # to one backend pod so multi-replica rollouts don't drop sessions.
+    appgw.ingress.kubernetes.io/cookie-based-affinity: "true"
 spec:
   rules:
     - host: "{{ dashboard_hostname }}"
