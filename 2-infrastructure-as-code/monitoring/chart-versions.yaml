@@ -1,0 +1,10 @@
+# Pinned Helm chart versions for the observability stack.
+# Bump deliberately; check what is available with:
+#   helm repo update
+#   helm search repo prometheus-community/kube-prometheus-stack --versions | head
+#   helm search repo grafana/loki --versions | head
+#   helm search repo grafana/promtail --versions | head
+---
+kube_prometheus_stack_version: "89.2.4" # Prometheus operator v0.93, Grafana 12.x
+loki_version: "7.3.0"                    # Loki 3.6 (grafana/loki, SingleBinary mode)
+promtail_version: "6.17.1"              # DaemonSet log shipper (grafana/promtail)

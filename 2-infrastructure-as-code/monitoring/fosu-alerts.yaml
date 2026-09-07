@@ -1,0 +1,64 @@
+# Applied verbatim (no templating) so Prometheus's own {{ $labels.* }} syntax
+# survives. If you change the monitoring namespace, update the namespace here and
+# the LokiRequestErrors selector below, plus monitoring_namespace in Terraform.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: fosu-app-rules
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: fosu.rules
+      rules:
+        - alert: FosuDeploymentNotReady
+          expr: |
+            kube_deployment_status_replicas_available{namespace="project-fosu"}
+              < kube_deployment_spec_replicas{namespace="project-fosu"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.deployment }} has fewer ready replicas than desired"
+
+        - alert: FosuPodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total{namespace="project-fosu"}[15m]) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "project-fosu/{{ $labels.pod }} is restarting repeatedly"
+
+        - alert: FosuPodNotReady
+          expr: |
+            sum by (pod) (kube_pod_status_ready{namespace="project-fosu", condition="true"}) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }} has been not-ready for 15m"
+
+        - alert: FosuContainerMemoryHigh
+          expr: |
+            max by (namespace, pod, container) (
+              container_memory_working_set_bytes{namespace="project-fosu", container!=""}
+            )
+            /
+            max by (namespace, pod, container) (
+              kube_pod_container_resource_limits{namespace="project-fosu", resource="memory"}
+            ) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.pod }} is above 90% of its memory limit"
+
+        - alert: LokiRequestErrors
+          expr: |
+            sum(rate(loki_request_duration_seconds_count{namespace="monitoring", status_code=~"5.."}[5m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Loki is returning 5xx responses"

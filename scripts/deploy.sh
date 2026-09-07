@@ -43,6 +43,7 @@ if [[ ! -f "${DEFAULT_ANSIBLE_INVENTORY}" ]]; then
 fi
 ANSIBLE_INVENTORY="${ANSIBLE_INVENTORY:-${DEFAULT_ANSIBLE_INVENTORY}}"
 TRIVY_SEVERITY="${TRIVY_SEVERITY:-HIGH,CRITICAL}"
+MONITORING_NAMESPACE="${MONITORING_NAMESPACE:-monitoring}"
 LOG_FILE="${LOG_FILE:-${PROJECT_ROOT}/.local/logs/deploy.log}"
 
 # Azure Terraform backend, parsed from versions.tf so it cannot drift.
@@ -74,6 +75,7 @@ Commands
     infra       Initialize, validate, plan, and apply Terraform
     app         Build, push, pull, scan, and deploy with Ansible
     deploy      Build/push, provision, pull/scan, configure, and deploy
+    monitoring  Install the Loki/Prometheus/Grafana stack on AKS (needs VPN)
     status      Show local and AKS deployment status
     destroy     Destroy Azure infrastructure (requires --confirm-destroy)
     down        Stop the local Docker Compose stack without deleting volumes
@@ -382,6 +384,26 @@ provision_infrastructure() {
     [[ "${DRY_RUN}" == "true" ]] || rm -f "${TERRAFORM_DIR}/tfplan"
 }
 
+deploy_monitoring() {
+    section "Install observability stack (Loki / Prometheus / Grafana)"
+    require_command helm
+    require_command ansible-playbook
+    require_file "${ANSIBLE_DIR}/monitoring.yml"
+    require_file "${ANSIBLE_INVENTORY}"
+    export KUBECONFIG="${KUBECONFIG_PATH}"
+    local -a ansible_command=(
+        ansible-playbook
+        -i "${ANSIBLE_INVENTORY}"
+        "${ANSIBLE_DIR}/monitoring.yml"
+        --extra-vars "monitoring_namespace=${MONITORING_NAMESPACE}"
+    )
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        run "${ansible_command[@]}"
+        return 0
+    fi
+    "${ansible_command[@]}"
+}
+
 deploy_application() {
     section "Configure infrastructure and deploy application"
     require_command ansible-playbook
@@ -557,6 +579,7 @@ case "${COMMAND:-deploy}" in
     scan) scan_all ;;
     infra) preflight; provision_infrastructure ;;
     app) require_vpn; preflight; build_image; run_scans; push_image; deploy_application; show_status ;;
+    monitoring) require_vpn; deploy_monitoring ;;
     deploy) deploy_cloud ;;
     status) show_status ;;
     destroy) destroy_infrastructure ;;

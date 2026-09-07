@@ -545,13 +545,59 @@ docker compose down
 
 Open the dashboard at `http://localhost:8501` or the API documentation at `http://localhost:8000/docs`.
 
+## Observability (Loki / Prometheus / Grafana)
+
+An optional in-cluster stack for metrics, logs, and alerting, installed into a
+dedicated `monitoring` namespace by Helm charts driven from Ansible.
+
+- **Prometheus** (kube-prometheus-stack) scrapes kube-state-metrics,
+  node-exporter, and cAdvisor: CPU / memory / network per pod, restarts, replica
+  health, PVC usage. TSDB on a `managed-csi` PVC, 10-day retention.
+- **Loki** stores log chunks in a private Azure Blob container
+  (`monitoring.tf`), authenticating as a Workload Identity (no keys). It runs in
+  SingleBinary mode.
+- **Promtail** (DaemonSet) tails `/var/log/pods` on every node and ships all pod
+  logs to Loki, labelled by `namespace` / `pod` / `container` — so `fosu-api`,
+  `fosu-dashboard`, and `fosu-yolo-sensor` logs are searchable in Grafana with no
+  app changes.
+- **Grafana** ships with a Loki data source, community dashboards, a
+  Fosu-specific board (`2-infrastructure-as-code/monitoring/dashboards/`), and
+  Alertmanager alerts (kube-prometheus-stack defaults plus
+  `monitoring/fosu-alerts.yaml`).
+
+Prerequisites: `terraform apply` including `monitoring.tf`, the `helm` binary,
+and an active VPN tunnel with a working `/tmp/project-fosu-kubeconfig` (i.e. run
+`scripts/deploy.sh app` at least once first).
+
+```bash
+scripts/deploy.sh infra          # provisions the Loki storage + federated identity
+scripts/deploy.sh monitoring     # helm installs kps + loki + promtail
+
+# reach Grafana (ClusterIP only)
+kubectl -n monitoring port-forward svc/grafana 3000:80
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d ; echo
+```
+
+Set `GRAFANA_ADMIN_PASSWORD` in the environment before the first run to choose
+the admin password; otherwise one is generated and stored in the `grafana-admin`
+secret. Chart versions are pinned in
+`2-infrastructure-as-code/monitoring/chart-versions.yaml`. Container Insights
+(`oms_agent`) still runs in parallel; disable it in `main.tf` if you standardise
+on Grafana.
+
+Sizing note: the stack adds ~2 GiB of requests across the `Standard_B2s` user
+pool, so the cluster autoscaler will likely add a node. Move monitoring to a
+dedicated node pool (or larger VMs) for anything beyond an MVP.
+
+In CI, run **Actions → CI/CD pipeline → Run workflow → deploy: `monitoring`**.
+
 ## CI/CD pipeline
 
 `.github/workflows/security-quality.yml` runs one workflow whose jobs mirror the
 `scripts/deploy.sh` roadmap, chained with `needs:`:
 
 ```
-preflight -> build -> scan -> push -> infra -> app -> status
+preflight -> build -> scan -> push -> infra -> {app, monitoring} -> status
 ```
 
 - **preflight** – `terraform fmt`/`validate`, `shellcheck`, `hadolint`, and
@@ -564,12 +610,15 @@ preflight -> build -> scan -> push -> infra -> app -> status
 	`REGISTRY_PASSWORD` are set.
 - **infra** – `terraform init/validate/plan` against the real backend on every
 	run that has the Azure OIDC secrets; `terraform apply` only from a manual
-	**Run workflow** with the `deploy` input set to `infra` or `app`, gated by the
-	`production` Environment.
+	**Run workflow** with the `deploy` input set to `infra`, `app`, or
+	`monitoring`, gated by the `production` Environment.
 - **app** – `ansible-playbook site.yml`, only when `deploy=app`. On a
 	GitHub-hosted runner it connects the P2S VPN from `VPN_CLIENT_CERT` /
 	`VPN_CLIENT_KEY`; set the `FOSU_DEPLOY_RUNNER` variable to a self-hosted
 	runner inside the VNet instead (recommended).
+- **monitoring** – `ansible-playbook monitoring.yml` (helm installs the LGTM
+	stack), only when `deploy=monitoring`. Same runner/VPN story as **app**; also
+	reads `GRAFANA_ADMIN_PASSWORD` if set.
 - **status** – prints `terraform output` to the run summary.
 
 Everything past **scan** is gated on the matching secrets/vars, so an
@@ -583,6 +632,7 @@ Configure:
 | Azure (OIDC) | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | – |
 | Terraform vars | `TF_VAR_dashboard_hostname`, `TF_VAR_dashboard_password_hash`, `TF_VAR_postgres_admin_password`, `TF_VAR_dashboard_tls_certificate_base64`, `TF_VAR_dashboard_tls_certificate_password`, `TF_VAR_vpn_root_certificate_data` | – |
 | App deploy | `VPN_CLIENT_CERT`, `VPN_CLIENT_KEY` (hosted runner only) | `FOSU_DEPLOY_RUNNER` (self-hosted runner label) |
+| Monitoring | `GRAFANA_ADMIN_PASSWORD` (optional) | – |
 
 The federated Azure identity needs `Storage Blob Data Contributor` on the
 Terraform state account plus permission to manage the target resources. Use a

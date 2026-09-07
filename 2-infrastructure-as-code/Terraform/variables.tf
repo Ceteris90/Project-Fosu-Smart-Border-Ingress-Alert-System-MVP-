@@ -130,3 +130,15 @@ variable "vpn_root_certificate_data" {
   sensitive   = true
   description = "Base64-encoded public root certificate for point-to-site VPN."
 }
+
+variable "monitoring_namespace" {
+  type        = string
+  default     = "monitoring"
+  description = "Kubernetes namespace for the Loki/Prometheus/Grafana stack. Must match the namespace the monitoring playbook installs into (the Loki federated identity subject is bound to it)."
+}
+
+variable "loki_storage_replication_type" {
+  type        = string
+  default     = "LRS"
+  description = "Replication for the Loki log-chunk storage account (LRS, ZRS, GRS)."
+}

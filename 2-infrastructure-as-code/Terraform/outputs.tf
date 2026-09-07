@@ -21,3 +21,19 @@ output "application_gateway_public_ip" {
 output "vpn_gateway_public_ip" {
   value = azurerm_public_ip.vpn_gateway.ip_address
 }
+
+output "monitoring_namespace" {
+  value = var.monitoring_namespace
+}
+
+output "loki_storage_account_name" {
+  value = azurerm_storage_account.loki.name
+}
+
+output "loki_storage_container_name" {
+  value = azurerm_storage_container.loki.name
+}
+
+output "loki_identity_client_id" {
+  value = azurerm_user_assigned_identity.loki.client_id
+}

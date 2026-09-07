@@ -1,0 +1,207 @@
+# kube-prometheus-stack values for Project Fosu.
+# Sized for the Standard_B2s user node pool; raise requests/retention if you move
+# monitoring onto a dedicated pool.
+
+fullnameOverride: kps
+
+crds:
+  enabled: true
+
+# AKS hides these control-plane components; scraping them only produces dead
+# targets and noisy alerts.
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+defaultRules:
+  create: true
+  rules:
+    kubeControllerManager: false
+    kubeSchedulerAlerting: false
+    kubeProxy: false
+    etcd: false
+
+alertmanager:
+  alertmanagerSpec:
+    replicas: 1
+    retention: 120h
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+  config:
+    route:
+      group_by: ["namespace", "alertname"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: "null"
+      routes:
+        - receiver: "null"
+          matchers:
+            - alertname = "Watchdog"
+    receivers:
+      - name: "null"
+    # To page a real destination, replace the "null" receiver above, e.g.:
+    #   - name: "null"
+    #   - name: slack
+    #     slack_configs:
+    #       - api_url: <webhook>        # store as an Alertmanager secret, not here
+    #         channel: "#fosu-alerts"
+    #         send_resolved: true
+    # ...and point route.receiver / routes[].receiver at "slack".
+
+grafana:
+  enabled: true
+  fullnameOverride: grafana
+  replicas: 1
+  defaultDashboardsTimezone: browser
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
+  persistence:
+    enabled: false
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  grafana.ini:
+    analytics:
+      check_for_updates: false
+      reporting_enabled: false
+    auth.anonymous:
+      enabled: false
+    users:
+      viewers_can_edit: false
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+      folderAnnotation: grafana_folder
+      provider:
+        foldersFromFilesStructure: true
+    datasources:
+      enabled: true
+  additionalDataSources:
+    - name: Loki
+      uid: loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      jsonData:
+        maxLines: 1000
+  # Community dashboards pulled from grafana.com at first start (cluster egress
+  # to grafana.com required). The Fosu-specific board ships as a ConfigMap.
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: default
+          orgId: 1
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+  dashboards:
+    default:
+      kubernetes-pods:
+        gnetId: 15760
+        revision: 36
+        datasource: Prometheus
+      kubernetes-global:
+        gnetId: 15757
+        revision: 42
+        datasource: Prometheus
+      node-exporter-full:
+        gnetId: 1860
+        revision: 37
+        datasource: Prometheus
+      loki-logs:
+        gnetId: 13639
+        revision: 2
+        datasource: Loki
+
+prometheus:
+  prometheusSpec:
+    replicas: 1
+    retention: 10d
+    retentionSize: "25GB"
+    scrapeInterval: 60s
+    evaluationInterval: 60s
+    walCompression: true
+    # Discover ServiceMonitors/PodMonitors/Rules from every namespace, not just
+    # ones carrying this chart's release label.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 250m
+        memory: 768Mi
+      limits:
+        memory: 1536Mi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 30Gi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+  tolerations:
+    - operator: Exists
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+  admissionWebhooks:
+    patch:
+      resources:
+        requests:
+          cpu: 20m
+          memory: 32Mi

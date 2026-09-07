@@ -1,0 +1,213 @@
+---
+- name: Install the Loki / Prometheus / Grafana stack on private AKS
+  hosts: aks_control
+  gather_facts: false
+  collections:
+    - kubernetes.core
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir }}/../../.venv/bin/python"
+    kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default('/tmp/project-fosu-kubeconfig', true) }}"
+    terraform_dir: "{{ playbook_dir }}/../Terraform"
+    monitoring_dir: "{{ playbook_dir }}/../monitoring"
+    grafana_admin_user: "{{ lookup('env', 'GRAFANA_ADMIN_USER') | default('admin', true) }}"
+
+  pre_tasks:
+    - name: Apply monitoring defaults when not set by extra vars
+      ansible.builtin.set_fact:
+        monitoring_namespace: "{{ monitoring_namespace | default('monitoring', true) }}"
+
+    - name: Load pinned chart versions
+      ansible.builtin.include_vars:
+        file: "{{ monitoring_dir }}/chart-versions.yaml"
+
+    - name: Require helm and kubectl
+      ansible.builtin.command: "{{ item }}"
+      changed_when: false
+      loop:
+        - helm version --short
+        - kubectl version --client
+
+    - name: Require an active VPN tunnel to the private cluster
+      ansible.builtin.command: ip -o link show up
+      register: up_links
+      changed_when: false
+
+    - name: Assert the VPN tunnel is up
+      ansible.builtin.assert:
+        that:
+          - up_links.stdout is regex('^[0-9]+: (tun|tap)')
+        fail_msg: >-
+          No active VPN tunnel. Connect OpenVPN before running the monitoring
+          playbook (see the Azure deployment section of the README).
+
+    - name: Check the kubeconfig can reach the cluster
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - --kubeconfig
+          - "{{ kubeconfig_path }}"
+          - --request-timeout=10s
+          - get
+          - namespace
+      changed_when: false
+      register: kube_check
+      failed_when: kube_check.rc != 0
+
+    - name: Read Terraform outputs
+      ansible.builtin.command:
+        argv: [terraform, output, -json]
+        chdir: "{{ terraform_dir }}"
+      register: terraform_output
+      changed_when: false
+      no_log: true
+
+    - name: Set Loki storage facts from Terraform outputs
+      ansible.builtin.set_fact:
+        loki_storage_account: "{{ (terraform_output.stdout | from_json).loki_storage_account_name.value }}"
+        loki_container: "{{ (terraform_output.stdout | from_json).loki_storage_container_name.value }}"
+        loki_identity_client_id: "{{ (terraform_output.stdout | from_json).loki_identity_client_id.value }}"
+
+    - name: Require the Loki storage outputs
+      ansible.builtin.assert:
+        that:
+          - loki_storage_account | length > 0
+          - loki_container | length > 0
+          - loki_identity_client_id | length > 0
+        fail_msg: >-
+          Terraform has not been applied with monitoring.tf yet. Run
+          'scripts/deploy.sh infra' first.
+
+  tasks:
+    - name: Create the monitoring namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ monitoring_namespace }}"
+            labels:
+              # node-exporter/promtail need host access; keep this namespace
+              # out of the restricted Pod Security profile.
+              pod-security.kubernetes.io/enforce: privileged
+
+    - name: Look up any existing Grafana admin secret
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: v1
+        kind: Secret
+        namespace: "{{ monitoring_namespace }}"
+        name: grafana-admin
+      register: existing_grafana_secret
+      no_log: true
+
+    - name: Resolve the Grafana admin password (reuse existing, else env, else generate)
+      ansible.builtin.set_fact:
+        grafana_admin_password: >-
+          {{ (existing_grafana_secret.resources[0].data['admin-password'] | b64decode)
+             if (existing_grafana_secret.resources | length > 0)
+             else (lookup('env', 'GRAFANA_ADMIN_PASSWORD')
+                   | default(lookup('ansible.builtin.password', '/dev/null length=24 chars=ascii_letters,digits'), true)) }}
+      no_log: true
+
+    - name: Create the Grafana admin secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: grafana-admin
+            namespace: "{{ monitoring_namespace }}"
+          type: Opaque
+          stringData:
+            admin-user: "{{ grafana_admin_user }}"
+            admin-password: "{{ grafana_admin_password }}"
+      no_log: true
+
+    - name: Add Helm repositories
+      kubernetes.core.helm_repository:
+        name: "{{ item.name }}"
+        repo_url: "{{ item.url }}"
+      loop:
+        - { name: prometheus-community, url: "https://prometheus-community.github.io/helm-charts" }
+        - { name: grafana, url: "https://grafana.github.io/helm-charts" }
+
+    - name: Render the Loki values file
+      ansible.builtin.template:
+        src: "{{ monitoring_dir }}/loki.values.yaml"
+        dest: "/tmp/project-fosu-loki.values.yaml"
+        mode: "0600"
+
+    - name: Install kube-prometheus-stack
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: kps
+        chart_ref: prometheus-community/kube-prometheus-stack
+        chart_version: "{{ kube_prometheus_stack_version }}"
+        release_namespace: "{{ monitoring_namespace }}"
+        create_namespace: false
+        values_files:
+          - "{{ monitoring_dir }}/kube-prometheus-stack.values.yaml"
+        wait: true
+        timeout: 15m
+
+    - name: Install Loki
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: loki
+        chart_ref: grafana/loki
+        chart_version: "{{ loki_version }}"
+        release_namespace: "{{ monitoring_namespace }}"
+        create_namespace: false
+        values_files:
+          - "/tmp/project-fosu-loki.values.yaml"
+        wait: true
+        timeout: 15m
+
+    - name: Install Promtail
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig_path }}"
+        name: promtail
+        chart_ref: grafana/promtail
+        chart_version: "{{ promtail_version }}"
+        release_namespace: "{{ monitoring_namespace }}"
+        create_namespace: false
+        values_files:
+          - "{{ monitoring_dir }}/promtail.values.yaml"
+        wait: true
+        timeout: 10m
+
+    - name: Apply Fosu alert rules
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig_path }}"
+        state: present
+        src: "{{ monitoring_dir }}/fosu-alerts.yaml"
+
+    - name: Wait for Grafana
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig_path }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ monitoring_namespace }}"
+        name: grafana
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 300
+
+    - name: Remove the rendered Loki values file
+      ansible.builtin.file:
+        path: /tmp/project-fosu-loki.values.yaml
+        state: absent
+
+    - name: Show access instructions
+      ansible.builtin.debug:
+        msg:
+          - "Grafana:      kubectl -n {{ monitoring_namespace }} port-forward svc/grafana 3000:80  ->  http://localhost:3000"
+          - "Prometheus:   kubectl -n {{ monitoring_namespace }} port-forward svc/kps-prometheus 9090:9090"
+          - "Alertmanager: kubectl -n {{ monitoring_namespace }} port-forward svc/kps-alertmanager 9093:9093"
+          - "Grafana user: {{ grafana_admin_user }}  (password: kubectl -n {{ monitoring_namespace }} get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d)"

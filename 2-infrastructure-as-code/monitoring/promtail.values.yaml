@@ -1,0 +1,27 @@
+# grafana/promtail DaemonSet: tails /var/log/pods on every node and ships to
+# Loki. The default scrape config already discovers all pods and sets
+# namespace / app / pod / container / node_name labels, so fosu-api,
+# fosu-dashboard and fosu-yolo-sensor logs are captured with no extra config.
+
+fullnameOverride: promtail
+
+config:
+  clients:
+    - url: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+  snippets:
+    pipelineStages:
+      - cri: {}
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# Run on the tainted system pool too.
+tolerations:
+  - operator: Exists
+
+serviceMonitor:
+  enabled: true

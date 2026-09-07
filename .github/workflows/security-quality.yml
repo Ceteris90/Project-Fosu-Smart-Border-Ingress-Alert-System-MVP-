@@ -27,9 +27,9 @@ on:
   workflow_dispatch:
     inputs:
       deploy:
-        description: "Release side to run (infra = terraform apply, app = + ansible deploy)"
+        description: "Release side to run (infra = terraform apply, app = + ansible deploy, monitoring = + LGTM stack)"
         type: choice
-        options: [none, infra, app]
+        options: [none, infra, app, monitoring]
         default: none
 
 permissions:
@@ -54,6 +54,7 @@ jobs:
       release: ${{ steps.d.outputs.release }}
       apply: ${{ steps.d.outputs.apply }}
       run_app: ${{ steps.d.outputs.run_app }}
+      run_monitoring: ${{ steps.d.outputs.run_monitoring }}
       has_registry: ${{ steps.d.outputs.has_registry }}
       has_azure: ${{ steps.d.outputs.has_azure }}
       image_repository: ${{ steps.d.outputs.image_repository }}
@@ -87,6 +88,11 @@ jobs:
             run_app=true
           fi
 
+          run_monitoring=false
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_INPUT:-none}" = "monitoring" ]; then
+            run_monitoring=true
+          fi
+
           has_registry=false
           if [ -n "${REGISTRY_USERNAME}" ] && [ -n "${REGISTRY_PASSWORD}" ]; then
             has_registry=true
@@ -106,13 +112,14 @@ jobs:
             echo "release=${release}"
             echo "apply=${apply}"
             echo "run_app=${run_app}"
+            echo "run_monitoring=${run_monitoring}"
             echo "has_registry=${has_registry}"
             echo "has_azure=${has_azure}"
             echo "image_repository=${IMAGE_REPOSITORY_VAR:-ceteris90/project-fosu}"
             echo "tf_environment=${tf_environment}"
           } >> "${GITHUB_OUTPUT}"
 
-          echo "release=${release} apply=${apply} run_app=${run_app} has_registry=${has_registry} has_azure=${has_azure}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "release=${release} apply=${apply} run_app=${run_app} run_monitoring=${run_monitoring} has_registry=${has_registry} has_azure=${has_azure}" >> "${GITHUB_STEP_SUMMARY}"
 
   # ---------------------------------------------------------------------------
   # deploy.sh preflight  -> validate tooling, IaC, scripts, playbook
@@ -453,12 +460,127 @@ jobs:
             --extra-vars "fosu_namespace=project-fosu"
 
   # ---------------------------------------------------------------------------
+  # deploy.sh monitoring  -> Loki / Prometheus / Grafana via Helm + Ansible
+  # ---------------------------------------------------------------------------
+  monitoring:
+    name: monitoring
+    needs: [config, infra]
+    if: needs.config.outputs.run_monitoring == 'true' && needs.infra.result == 'success'
+    environment: production
+    runs-on: ${{ vars.FOSU_DEPLOY_RUNNER || 'ubuntu-latest' }}
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_dashboard_hostname: ${{ secrets.TF_VAR_dashboard_hostname }}
+      TF_VAR_dashboard_password_hash: ${{ secrets.TF_VAR_dashboard_password_hash }}
+      TF_VAR_postgres_admin_password: ${{ secrets.TF_VAR_postgres_admin_password }}
+      TF_VAR_dashboard_tls_certificate_base64: ${{ secrets.TF_VAR_dashboard_tls_certificate_base64 }}
+      TF_VAR_dashboard_tls_certificate_password: ${{ secrets.TF_VAR_dashboard_tls_certificate_password }}
+      TF_VAR_vpn_root_certificate_data: ${{ secrets.TF_VAR_vpn_root_certificate_data }}
+      GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install kubelogin
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: latest
+
+      - name: Install Python and Ansible dependencies
+        run: |
+          set -eu
+          python3 -m pip install --quiet -r requirements.txt
+          ansible-galaxy collection install -r 2-infrastructure-as-code/Ansible/requirements.yml \
+            -p 2-infrastructure-as-code/Ansible/.collections
+
+      - name: Connect the point-to-site VPN (hosted runner only)
+        if: runner.environment == 'github-hosted'
+        env:
+          VPN_CLIENT_CERT: ${{ secrets.VPN_CLIENT_CERT }}
+          VPN_CLIENT_KEY: ${{ secrets.VPN_CLIENT_KEY }}
+        run: |
+          set -eu
+          if [ -z "${VPN_CLIENT_CERT}" ] || [ -z "${VPN_CLIENT_KEY}" ]; then
+            echo "::error::monitoring is on a GitHub-hosted runner but VPN_CLIENT_CERT / VPN_CLIENT_KEY are not set."
+            echo "::error::Set them, or run this job on a self-hosted runner inside the VNet (repo variable FOSU_DEPLOY_RUNNER)."
+            exit 1
+          fi
+          sudo apt-get update -y && sudo apt-get install -y openvpn openvpn-systemd-resolved
+          mkdir -p 2-infrastructure-as-code/Terraform
+          printf '%s' "${VPN_CLIENT_CERT}" > 2-infrastructure-as-code/Terraform/vpn-client.crt
+          printf '%s' "${VPN_CLIENT_KEY}"  > 2-infrastructure-as-code/Terraform/vpn-client.key
+          chmod 600 2-infrastructure-as-code/Terraform/vpn-client.key
+          ./2-infrastructure-as-code/refresh_vpn_profile.sh
+          sudo openvpn --config .local/vpn/OpenVPN/vpnconfig.ovpn --daemon --log /tmp/openvpn.log
+          for _ in $(seq 1 30); do
+            ip link show tun0 >/dev/null 2>&1 && break
+            sleep 2
+          done
+          ip link show tun0 >/dev/null 2>&1 || { echo "::error::VPN tunnel did not come up"; cat /tmp/openvpn.log; exit 1; }
+
+      - name: Fetch the private AKS kubeconfig
+        env:
+          KUBECONFIG: /tmp/project-fosu-kubeconfig
+        run: |
+          set -eu
+          TF=2-infrastructure-as-code/Terraform
+          RG=$(terraform -chdir="$TF" output -raw resource_group_name)
+          AKS=$(terraform -chdir="$TF" output -raw aks_cluster_name)
+          az aks get-credentials --resource-group "$RG" --name "$AKS" --file "$KUBECONFIG" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli --kubeconfig "$KUBECONFIG"
+          # Private cluster: resolve the API server's private IP and pin it with SNI
+          # (same routing site.yml sets up for the app job).
+          META=$(az aks show -g "$RG" -n "$AKS" --query '{nrg:nodeResourceGroup,fqdn:privateFqdn}' -o json)
+          NRG=$(printf '%s' "$META" | python3 -c 'import sys,json;print(json.load(sys.stdin)["nrg"])')
+          FQDN=$(printf '%s' "$META" | python3 -c 'import sys,json;print(json.load(sys.stdin)["fqdn"])')
+          IP=$(az network private-dns record-set a show \
+            --resource-group "$NRG" --zone-name "${FQDN#*.}" --name "${FQDN%%.*}" \
+            --query 'aRecords[0].ipv4Address' -o tsv)
+          kubectl config --kubeconfig "$KUBECONFIG" set-cluster "$AKS" \
+            --server="https://${IP}:443" --tls-server-name="$FQDN"
+          kubectl --kubeconfig "$KUBECONFIG" --request-timeout=15s get namespace
+
+      - name: Install the monitoring stack
+        env:
+          KUBECONFIG: /tmp/project-fosu-kubeconfig
+          ANSIBLE_COLLECTIONS_PATH: 2-infrastructure-as-code/Ansible/.collections
+        run: |
+          set -eu
+          ansible-playbook \
+            -i 2-infrastructure-as-code/Ansible/inventory.ini.example \
+            2-infrastructure-as-code/Ansible/monitoring.yml \
+            --extra-vars "ansible_python_interpreter=$(command -v python3)"
+
+  # ---------------------------------------------------------------------------
   # deploy.sh show_status  -> best-effort summary
   # ---------------------------------------------------------------------------
   status:
     name: status
     runs-on: ubuntu-latest
-    needs: [config, infra, app]
+    needs: [config, infra, app, monitoring]
     if: always() && needs.config.outputs.has_azure == 'true' && needs.infra.result == 'success'
     permissions:
       id-token: write
