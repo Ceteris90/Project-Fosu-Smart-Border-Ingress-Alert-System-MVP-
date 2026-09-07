@@ -220,9 +220,17 @@ Production state uses the Azure backend declared in
 - container: `tfstate`; and
 - state key: `project-fosu-prod.tfstate`.
 
-The operator needs `Storage Blob Data Contributor` on the backend storage
-account. Do not change the backend or state key to bypass access errors because
-that would make existing resources appear unmanaged.
+Create these resources once per subscription with the idempotent helper (it
+also grants the current user `Storage Blob Data Contributor`, required by
+`use_azuread_auth = true`):
+
+```bash
+scripts/bootstrap_backend.sh
+```
+
+`scripts/deploy.sh preflight` fails early if the backend container is missing or
+unreadable. Do not change the backend or state key to bypass access errors
+because that would make existing resources appear unmanaged.
 
 ```bash
 cd 2-infrastructure-as-code/Terraform
@@ -537,23 +545,50 @@ docker compose down
 
 Open the dashboard at `http://localhost:8501` or the API documentation at `http://localhost:8000/docs`.
 
-## Security and code quality
+## CI/CD pipeline
 
-The `Security and quality` GitHub Actions workflow runs on pull requests and
-pushes to `main` or `master`. It:
+`.github/workflows/security-quality.yml` runs one workflow whose jobs mirror the
+`scripts/deploy.sh` roadmap, chained with `needs:`:
 
-- scans the repository for vulnerable dependencies, secrets, and infrastructure
-	misconfigurations with Trivy;
-- builds the application image and fails on fixable high or critical image
-	vulnerabilities; and
-- submits source analysis to SonarQube when its repository secrets are present.
+```
+preflight -> build -> scan -> push -> infra -> app -> status
+```
 
-Configure a project with the key `project-fosu-smart-border` in SonarQube, then
-add these GitHub Actions repository secrets:
+- **preflight** – `terraform fmt`/`validate`, `shellcheck`, `hadolint`, and
+	`ansible-playbook --syntax-check`.
+- **build** – builds the image and warms the buildx cache.
+- **scan** – Trivy image scan (fails on fixable HIGH/CRITICAL), Trivy source
+	scan (SARIF to the Security tab), then SonarQube when its secrets are set.
+- **push** – pushes `:<sha>` and `:latest` to the registry. Runs only on
+	`main`/`master` or a manual run, and only when `REGISTRY_USERNAME` /
+	`REGISTRY_PASSWORD` are set.
+- **infra** – `terraform init/validate/plan` against the real backend on every
+	run that has the Azure OIDC secrets; `terraform apply` only from a manual
+	**Run workflow** with the `deploy` input set to `infra` or `app`, gated by the
+	`production` Environment.
+- **app** – `ansible-playbook site.yml`, only when `deploy=app`. On a
+	GitHub-hosted runner it connects the P2S VPN from `VPN_CLIENT_CERT` /
+	`VPN_CLIENT_KEY`; set the `FOSU_DEPLOY_RUNNER` variable to a self-hosted
+	runner inside the VNet instead (recommended).
+- **status** – prints `terraform output` to the run summary.
 
-- `SONAR_TOKEN`: a project analysis token;
-- `SONAR_HOST_URL`: the externally reachable SonarQube URL, such as
-	`https://sonarqube.example.com`.
+Everything past **scan** is gated on the matching secrets/vars, so an
+unconfigured repo still gets preflight + build + scan and nothing hard-fails.
+Configure:
+
+| Purpose | Repository secrets | Repository variables |
+| --- | --- | --- |
+| SonarQube | `SONAR_TOKEN`, `SONAR_HOST_URL` | – |
+| Registry push | `REGISTRY_USERNAME`, `REGISTRY_PASSWORD` | `IMAGE_REPOSITORY` (default `ceteris90/project-fosu`) |
+| Azure (OIDC) | `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` | – |
+| Terraform vars | `TF_VAR_dashboard_hostname`, `TF_VAR_dashboard_password_hash`, `TF_VAR_postgres_admin_password`, `TF_VAR_dashboard_tls_certificate_base64`, `TF_VAR_dashboard_tls_certificate_password`, `TF_VAR_vpn_root_certificate_data` | – |
+| App deploy | `VPN_CLIENT_CERT`, `VPN_CLIENT_KEY` (hosted runner only) | `FOSU_DEPLOY_RUNNER` (self-hosted runner label) |
+
+The federated Azure identity needs `Storage Blob Data Contributor` on the
+Terraform state account plus permission to manage the target resources. Use a
+`project-fosu-smart-border` SonarQube project key. Configure the `production`
+Environment with required reviewers to approve `apply` / `app`. Update branch
+protection required checks to the new job names (`preflight`, `scan`, …).
 
 The GitHub-hosted runner must be able to reach `SONAR_HOST_URL`. Use a
 self-hosted runner or expose SonarQube through an authenticated HTTPS endpoint

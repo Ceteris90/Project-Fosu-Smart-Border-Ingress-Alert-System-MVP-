@@ -1,24 +1,124 @@
-name: Security and quality
+name: CI/CD pipeline
+
+# Ordered jobs that mirror the scripts/deploy.sh roadmap:
+#   preflight -> build -> scan -> push -> infra -> app -> status
+#
+# Every stage past "scan" is gated on the relevant secrets/vars being present, so
+# a fork or an unconfigured repo still gets preflight + build + scan and nothing
+# hard-fails. Configure these to unlock the rest:
+#   Repo variables : IMAGE_REPOSITORY (default ceteris90/project-fosu),
+#                    FOSU_DEPLOY_RUNNER (self-hosted runner label for the app job)
+#   Registry       : REGISTRY_USERNAME, REGISTRY_PASSWORD
+#   Azure (OIDC)   : AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#   Terraform vars : TF_VAR_dashboard_hostname, TF_VAR_dashboard_password_hash,
+#                    TF_VAR_postgres_admin_password,
+#                    TF_VAR_dashboard_tls_certificate_base64,
+#                    TF_VAR_dashboard_tls_certificate_password,
+#                    TF_VAR_vpn_root_certificate_data
+#   App (VPN)      : VPN_CLIENT_CERT, VPN_CLIENT_KEY  (only for a hosted app runner)
+#
+# apply / app only run from a manual "Run workflow" with the "deploy" input set,
+# and go through the "production" GitHub Environment for approval.
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   pull_request:
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Release side to run (infra = terraform apply, app = + ansible deploy)"
+        type: choice
+        options: [none, infra, app]
+        default: none
 
 permissions:
   contents: read
-  security-events: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  TRIVY_SEVERITY: HIGH,CRITICAL
+  IMAGE_NAME: project-fosu
+
 jobs:
-  iac:
-    name: IaC and shell checks
+  # ---------------------------------------------------------------------------
+  # Gate: derive booleans from secrets/vars/event (job `if:` can't read secrets)
+  # ---------------------------------------------------------------------------
+  config:
+    name: config
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.d.outputs.release }}
+      apply: ${{ steps.d.outputs.apply }}
+      run_app: ${{ steps.d.outputs.run_app }}
+      has_registry: ${{ steps.d.outputs.has_registry }}
+      has_azure: ${{ steps.d.outputs.has_azure }}
+      image_repository: ${{ steps.d.outputs.image_repository }}
+      tf_environment: ${{ steps.d.outputs.tf_environment }}
+    steps:
+      - id: d
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          IMAGE_REPOSITORY_VAR: ${{ vars.IMAGE_REPOSITORY }}
+          DEPLOY_INPUT: ${{ inputs.deploy }}
+        run: |
+          set -eu
+          release=false
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            release=true
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && { [ "${GITHUB_REF}" = "refs/heads/main" ] || [ "${GITHUB_REF}" = "refs/heads/master" ]; }; then
+            release=true
+          fi
+
+          apply=false
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_INPUT:-none}" != "none" ]; then
+            apply=true
+          fi
+
+          run_app=false
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${DEPLOY_INPUT:-none}" = "app" ]; then
+            run_app=true
+          fi
+
+          has_registry=false
+          if [ -n "${REGISTRY_USERNAME}" ] && [ -n "${REGISTRY_PASSWORD}" ]; then
+            has_registry=true
+          fi
+
+          has_azure=false
+          if [ -n "${AZURE_CLIENT_ID}" ] && [ -n "${AZURE_TENANT_ID}" ] && [ -n "${AZURE_SUBSCRIPTION_ID}" ]; then
+            has_azure=true
+          fi
+
+          tf_environment=""
+          if [ "${apply}" = "true" ]; then
+            tf_environment="production"
+          fi
+
+          {
+            echo "release=${release}"
+            echo "apply=${apply}"
+            echo "run_app=${run_app}"
+            echo "has_registry=${has_registry}"
+            echo "has_azure=${has_azure}"
+            echo "image_repository=${IMAGE_REPOSITORY_VAR:-ceteris90/project-fosu}"
+            echo "tf_environment=${tf_environment}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "release=${release} apply=${apply} run_app=${run_app} has_registry=${has_registry} has_azure=${has_azure}" >> "${GITHUB_STEP_SUMMARY}"
+
+  # ---------------------------------------------------------------------------
+  # deploy.sh preflight  -> validate tooling, IaC, scripts, playbook
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: preflight
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -29,7 +129,7 @@ jobs:
         with:
           terraform_wrapper: false
 
-      - name: Terraform format
+      - name: Terraform fmt
         run: terraform fmt -check -recursive 2-infrastructure-as-code/Terraform
 
       - name: Terraform validate
@@ -41,20 +141,92 @@ jobs:
       - name: ShellCheck
         run: shellcheck scripts/*.sh 2-infrastructure-as-code/*.sh
 
-  analyze:
-    name: SonarQube and Trivy
+      - name: Hadolint (Dockerfile)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: 1-app-source-code/Dockerfile
+          failure-threshold: error
+
+      - name: Ansible syntax check
+        run: |
+          python3 -m pip install --quiet 'ansible-core>=2.16,<2.19'
+          ansible-galaxy collection install -r 2-infrastructure-as-code/Ansible/requirements.yml \
+            -p 2-infrastructure-as-code/Ansible/.collections
+          ansible-playbook --syntax-check \
+            -i 2-infrastructure-as-code/Ansible/inventory.ini.example \
+            2-infrastructure-as-code/Ansible/site.yml
+
+  # ---------------------------------------------------------------------------
+  # deploy.sh build_image  -> build the image and warm the layer cache so the
+  # scan and push jobs rebuild from cache in seconds (the image is large; a
+  # multi-GB tar artifact would dominate the run).
+  # ---------------------------------------------------------------------------
+  build:
+    name: build
     runs-on: ubuntu-latest
+    needs: preflight
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: 1-app-source-code/Dockerfile
+          push: false
+          load: false
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  # deploy.sh run_scans  -> trivy image, then trivy source, then SonarQube
+  # ---------------------------------------------------------------------------
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      security-events: write
     env:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Scan repository with Trivy
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Rebuild image from cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: 1-app-source-code/Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+
+      - name: Trivy image scan (gate)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          scanners: vuln
+          format: table
+          exit-code: 1
+          severity: ${{ env.TRIVY_SEVERITY }}
+          ignore-unfixed: true
+          timeout: 10m0s
+
+      - name: Trivy source scan
         uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
@@ -62,7 +234,7 @@ jobs:
           scanners: vuln,secret,misconfig
           format: sarif
           output: trivy-results.sarif
-          severity: HIGH,CRITICAL
+          severity: ${{ env.TRIVY_SEVERITY }}
           ignore-unfixed: true
           timeout: 10m0s
           skip-dirs: .venv,venv,.local,2-infrastructure-as-code/Ansible/.collections
@@ -75,30 +247,260 @@ jobs:
           sarif_file: trivy-results.sarif
           category: trivy-filesystem
 
-      - name: Build application image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: 1-app-source-code/Dockerfile
-          load: true
-          push: false
-          tags: project-fosu:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Scan application image with Trivy
-        uses: aquasecurity/trivy-action@0.35.0
-        with:
-          image-ref: project-fosu:${{ github.sha }}
-          format: table
-          exit-code: 1
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-
-      - name: Run SonarQube analysis
+      - name: SonarQube analysis
         if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
         uses: SonarSource/sonarqube-scan-action@v6
         with:
           args: >
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=300
+
+  # ---------------------------------------------------------------------------
+  # deploy.sh push_image  -> publish the scanned image (release only)
+  # ---------------------------------------------------------------------------
+  push:
+    name: push
+    runs-on: ubuntu-latest
+    needs: [config, scan]
+    if: needs.config.outputs.release == 'true' && needs.config.outputs.has_registry == 'true'
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Registry login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build from cache and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: 1-app-source-code/Dockerfile
+          push: true
+          cache-from: type=gha
+          tags: |
+            ${{ needs.config.outputs.image_repository }}:${{ github.sha }}
+            ${{ needs.config.outputs.image_repository }}:latest
+
+      - name: Summary
+        run: echo "Pushed ${{ needs.config.outputs.image_repository }}:${{ github.sha }} and :latest" >> "${GITHUB_STEP_SUMMARY}"
+
+  # ---------------------------------------------------------------------------
+  # deploy.sh provision_infrastructure  -> terraform init/validate/plan[/apply]
+  # ---------------------------------------------------------------------------
+  infra:
+    name: infra
+    runs-on: ubuntu-latest
+    needs: [config, scan, push]
+    if: >-
+      always()
+      && needs.scan.result == 'success'
+      && needs.config.outputs.has_azure == 'true'
+      && (needs.push.result == 'success' || needs.push.result == 'skipped')
+    environment: ${{ needs.config.outputs.tf_environment }}
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: 2-infrastructure-as-code/Terraform
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_dashboard_hostname: ${{ secrets.TF_VAR_dashboard_hostname }}
+      TF_VAR_dashboard_password_hash: ${{ secrets.TF_VAR_dashboard_password_hash }}
+      TF_VAR_postgres_admin_password: ${{ secrets.TF_VAR_postgres_admin_password }}
+      TF_VAR_dashboard_tls_certificate_base64: ${{ secrets.TF_VAR_dashboard_tls_certificate_base64 }}
+      TF_VAR_dashboard_tls_certificate_password: ${{ secrets.TF_VAR_dashboard_tls_certificate_password }}
+      TF_VAR_vpn_root_certificate_data: ${{ secrets.TF_VAR_vpn_root_certificate_data }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Allow-list this runner on the Key Vault firewall
+        run: echo "TF_VAR_deployer_ip_cidr=$(curl -fsS https://api.ipify.org)/32" >> "${GITHUB_ENV}"
+
+      - name: Terraform init
+        run: terraform init -input=false -no-color
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Terraform apply
+        if: needs.config.outputs.apply == 'true'
+        run: terraform apply -input=false -no-color -auto-approve tfplan
+
+  # ---------------------------------------------------------------------------
+  # deploy.sh deploy_application  -> ansible playbook against private AKS
+  # ---------------------------------------------------------------------------
+  app:
+    name: app
+    needs: [config, infra]
+    if: needs.config.outputs.run_app == 'true' && needs.infra.result == 'success'
+    environment: production
+    runs-on: ${{ vars.FOSU_DEPLOY_RUNNER || 'ubuntu-latest' }}
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # refresh_vpn_profile.sh and site.yml both call `terraform output` against
+      # the azurerm backend, so the same backend/provider auth is needed here.
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_dashboard_hostname: ${{ secrets.TF_VAR_dashboard_hostname }}
+      TF_VAR_dashboard_password_hash: ${{ secrets.TF_VAR_dashboard_password_hash }}
+      TF_VAR_postgres_admin_password: ${{ secrets.TF_VAR_postgres_admin_password }}
+      TF_VAR_dashboard_tls_certificate_base64: ${{ secrets.TF_VAR_dashboard_tls_certificate_base64 }}
+      TF_VAR_dashboard_tls_certificate_password: ${{ secrets.TF_VAR_dashboard_tls_certificate_password }}
+      TF_VAR_vpn_root_certificate_data: ${{ secrets.TF_VAR_vpn_root_certificate_data }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Install kubelogin
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: latest
+
+      - name: Install Python and Ansible dependencies
+        run: |
+          set -eu
+          python3 -m pip install --quiet -r requirements.txt
+          ansible-galaxy collection install -r 2-infrastructure-as-code/Ansible/requirements.yml \
+            -p 2-infrastructure-as-code/Ansible/.collections
+
+      - name: Connect the point-to-site VPN (hosted runner only)
+        if: runner.environment == 'github-hosted'
+        env:
+          VPN_CLIENT_CERT: ${{ secrets.VPN_CLIENT_CERT }}
+          VPN_CLIENT_KEY: ${{ secrets.VPN_CLIENT_KEY }}
+        run: |
+          set -eu
+          if [ -z "${VPN_CLIENT_CERT}" ] || [ -z "${VPN_CLIENT_KEY}" ]; then
+            echo "::error::The app job is on a GitHub-hosted runner but VPN_CLIENT_CERT / VPN_CLIENT_KEY are not set."
+            echo "::error::Set them, or run this job on a self-hosted runner inside the VNet (repo variable FOSU_DEPLOY_RUNNER)."
+            exit 1
+          fi
+          sudo apt-get update -y && sudo apt-get install -y openvpn openvpn-systemd-resolved
+          mkdir -p 2-infrastructure-as-code/Terraform
+          printf '%s' "${VPN_CLIENT_CERT}" > 2-infrastructure-as-code/Terraform/vpn-client.crt
+          printf '%s' "${VPN_CLIENT_KEY}"  > 2-infrastructure-as-code/Terraform/vpn-client.key
+          chmod 600 2-infrastructure-as-code/Terraform/vpn-client.key
+          ./2-infrastructure-as-code/refresh_vpn_profile.sh
+          sudo openvpn --config .local/vpn/OpenVPN/vpnconfig.ovpn --daemon --log /tmp/openvpn.log
+          for _ in $(seq 1 30); do
+            ip link show tun0 >/dev/null 2>&1 && break
+            sleep 2
+          done
+          ip link show tun0 >/dev/null 2>&1 || { echo "::error::VPN tunnel did not come up"; cat /tmp/openvpn.log; exit 1; }
+
+      - name: Deploy with Ansible
+        env:
+          KUBECONFIG: /tmp/project-fosu-kubeconfig
+          ANSIBLE_COLLECTIONS_PATH: 2-infrastructure-as-code/Ansible/.collections
+        run: |
+          set -eu
+          # site.yml pins ansible_python_interpreter at the repo .venv; there is
+          # no .venv on the runner, so point it at this job's interpreter.
+          ansible-playbook \
+            -i 2-infrastructure-as-code/Ansible/inventory.ini.example \
+            2-infrastructure-as-code/Ansible/site.yml \
+            --extra-vars "ansible_python_interpreter=$(command -v python3)" \
+            --extra-vars "image_repository=${{ needs.config.outputs.image_repository }}" \
+            --extra-vars "image_tag=latest" \
+            --extra-vars "fosu_namespace=project-fosu"
+
+  # ---------------------------------------------------------------------------
+  # deploy.sh show_status  -> best-effort summary
+  # ---------------------------------------------------------------------------
+  status:
+    name: status
+    runs-on: ubuntu-latest
+    needs: [config, infra, app]
+    if: always() && needs.config.outputs.has_azure == 'true' && needs.infra.result == 'success'
+    permissions:
+      id-token: write
+      contents: read
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: 2-infrastructure-as-code/Terraform
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_USE_AZUREAD: "true"
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_VAR_dashboard_hostname: ${{ secrets.TF_VAR_dashboard_hostname }}
+      TF_VAR_dashboard_password_hash: ${{ secrets.TF_VAR_dashboard_password_hash }}
+      TF_VAR_postgres_admin_password: ${{ secrets.TF_VAR_postgres_admin_password }}
+      TF_VAR_dashboard_tls_certificate_base64: ${{ secrets.TF_VAR_dashboard_tls_certificate_base64 }}
+      TF_VAR_dashboard_tls_certificate_password: ${{ secrets.TF_VAR_dashboard_tls_certificate_password }}
+      TF_VAR_vpn_root_certificate_data: ${{ secrets.TF_VAR_vpn_root_certificate_data }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform outputs
+        run: |
+          set -eu
+          terraform init -input=false -no-color
+          {
+            echo '### Deployment outputs'
+            echo '```'
+            terraform output -no-color || true
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"

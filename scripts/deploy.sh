@@ -45,6 +45,13 @@ ANSIBLE_INVENTORY="${ANSIBLE_INVENTORY:-${DEFAULT_ANSIBLE_INVENTORY}}"
 TRIVY_SEVERITY="${TRIVY_SEVERITY:-HIGH,CRITICAL}"
 LOG_FILE="${LOG_FILE:-${PROJECT_ROOT}/.local/logs/deploy.log}"
 
+# Azure Terraform backend, parsed from versions.tf so it cannot drift.
+backend_value() {
+    sed -n "s/.*$1[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "${TERRAFORM_DIR}/versions.tf" | head -n1
+}
+BACKEND_STORAGE_ACCOUNT="$(backend_value storage_account_name)"
+BACKEND_CONTAINER="$(backend_value container_name)"
+
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -235,6 +242,13 @@ preflight() {
     docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
     azure_logged_in || die "Azure CLI is not authenticated; run 'az login'"
 
+    if [[ -n "${BACKEND_STORAGE_ACCOUNT}" && -n "${BACKEND_CONTAINER}" ]] && \
+        ! az storage container show --name "${BACKEND_CONTAINER}" \
+            --account-name "${BACKEND_STORAGE_ACCOUNT}" --auth-mode login \
+            --output none >/dev/null 2>&1; then
+        die "Terraform backend container ${BACKEND_STORAGE_ACCOUNT}/${BACKEND_CONTAINER} is missing or unreadable. Run: scripts/bootstrap_backend.sh"
+    fi
+
     if [[ ! -f "${TERRAFORM_DIR}/terraform.tfvars" ]]; then
         warn "terraform.tfvars is absent; required TF_VAR_* values must be exported"
     fi
@@ -354,7 +368,9 @@ provision_infrastructure() {
     fi
     section "Provision Azure infrastructure"
     prepare_terraform_environment
-    run terraform -chdir="${TERRAFORM_DIR}" init
+    if ! run terraform -chdir="${TERRAFORM_DIR}" init; then
+        die "terraform init failed. If the azurerm backend storage/container does not exist yet, run: scripts/bootstrap_backend.sh"
+    fi
     run terraform -chdir="${TERRAFORM_DIR}" validate
     run terraform -chdir="${TERRAFORM_DIR}" plan -out=tfplan
     if [[ "${AUTO_APPROVE}" == "true" ]]; then

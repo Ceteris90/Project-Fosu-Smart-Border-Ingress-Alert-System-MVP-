@@ -440,7 +440,6 @@ def load_camera_configs(args: argparse.Namespace) -> List[CameraConfig]:
     cameras_raw = config_data.get("cameras", [])
     if not cameras_raw:
         raise SystemExit(f"No camera entries found in config: {args.config}")
-    session.close()
 
     cameras: List[CameraConfig] = []
     for idx, item in enumerate(cameras_raw):
