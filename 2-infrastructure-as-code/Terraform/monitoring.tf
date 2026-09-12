@@ -85,9 +85,9 @@ resource "azurerm_role_assignment" "loki_blob_contributor" {
 }
 
 resource "azurerm_federated_identity_credential" "loki" {
-  name      = "loki"
-  parent_id = azurerm_user_assigned_identity.loki.id
-  audience  = ["api://AzureADTokenExchange"]
-  issuer    = azurerm_kubernetes_cluster.this.oidc_issuer_url
-  subject   = "system:serviceaccount:${var.monitoring_namespace}:loki"
+  name                      = "loki"
+  user_assigned_identity_id = azurerm_user_assigned_identity.loki.id
+  audience                  = ["api://AzureADTokenExchange"]
+  issuer                    = azurerm_kubernetes_cluster.this.oidc_issuer_url
+  subject                   = "system:serviceaccount:${var.monitoring_namespace}:loki"
 }

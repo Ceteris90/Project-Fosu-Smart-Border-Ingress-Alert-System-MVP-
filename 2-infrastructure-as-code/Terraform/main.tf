@@ -287,10 +287,21 @@ resource "azurerm_role_assignment" "aks_network_contributor" {
   principal_id         = azurerm_kubernetes_cluster.this.identity[0].principal_id
 }
 
-resource "azurerm_role_assignment" "current_aks_cluster_admin" {
-  scope                = azurerm_kubernetes_cluster.this.id
-  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
-  principal_id         = data.azurerm_client_config.current.object_id
+# AKS RBAC Cluster Admin is granted out-of-band (az role assignment create),
+# not by Terraform. Binding it to "whoever is currently running Terraform"
+# broke as soon as two different identities (a human operator and a CI
+# service principal) both needed to apply: every switch between them made
+# Terraform try to destroy the other's grant and replace it with its own,
+# which then also requires Microsoft.Authorization/roleAssignments/delete
+# on a grant it doesn't own — a permission this subscription's delegation
+# policy (ABAC-constrained User Access Administrator) does not hand out.
+# See the AKS + Key Vault sections of the README for the one-time grant
+# each admin identity needs.
+removed {
+  from = azurerm_role_assignment.current_aks_cluster_admin
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "azurerm_role_assignment" "agic_resource_group_reader" {
@@ -388,17 +399,19 @@ resource "azurerm_key_vault" "this" {
   }
 }
 
-resource "azurerm_role_assignment" "current_keyvault_admin" {
-  scope                = azurerm_key_vault.this.id
-  role_definition_name = "Key Vault Administrator"
-  principal_id         = data.azurerm_client_config.current.object_id
+# Key Vault Administrator is granted out-of-band (az role assignment create),
+# not by Terraform — same reasoning as current_aks_cluster_admin above.
+removed {
+  from = azurerm_role_assignment.current_keyvault_admin
+  lifecycle {
+    destroy = false
+  }
 }
 
 resource "azurerm_key_vault_secret" "dashboard_username" {
   name         = "dashboard-username"
   value        = var.dashboard_username
   key_vault_id = azurerm_key_vault.this.id
-  depends_on   = [azurerm_role_assignment.current_keyvault_admin]
 
   lifecycle {
     ignore_changes = [value, tags]
@@ -409,7 +422,6 @@ resource "azurerm_key_vault_secret" "dashboard_password_hash" {
   name         = "dashboard-password-hash"
   value        = var.dashboard_password_hash
   key_vault_id = azurerm_key_vault.this.id
-  depends_on   = [azurerm_role_assignment.current_keyvault_admin]
 
   lifecycle {
     ignore_changes = [value, tags]
@@ -420,7 +432,6 @@ resource "azurerm_key_vault_secret" "postgres_admin_password" {
   name         = "postgres-admin-password"
   value        = var.postgres_admin_password
   key_vault_id = azurerm_key_vault.this.id
-  depends_on   = [azurerm_role_assignment.current_keyvault_admin]
 }
 
 resource "azurerm_private_dns_zone" "postgres" {
