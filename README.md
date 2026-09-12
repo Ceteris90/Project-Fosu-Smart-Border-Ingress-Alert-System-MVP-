@@ -149,7 +149,7 @@ refuses to start without an active VPN tunnel so it cannot provision resources
 and then fail when private AKS access is required. Ansible prompts for the Vault
 password only when protected local Ansible variables are used.
 
-### Remove the Azure deployment
+### Remove the Azure deployment on cloud
 
 Azure teardown is deliberately guarded because it destroys cloud resources:
 
