@@ -1,3 +1,5 @@
+
+<img width="1725" height="1428" alt="fous drawio" src="https://github.com/user-attachments/assets/6fa0e586-67df-4b73-b906-88ebae60df28" />
 # Project Fosu Smart Border Ingress Alert System (MVP)
 A prototype border-crossing logging, mapping, and threshold-alert system that covers **the whole border**, not just a handful of named checkpoints.
 
