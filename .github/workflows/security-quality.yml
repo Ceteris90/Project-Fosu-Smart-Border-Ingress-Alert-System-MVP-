@@ -272,6 +272,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [config, scan]
     if: needs.config.outputs.release == 'true' && needs.config.outputs.has_registry == 'true'
+    env:
+      # Belt-and-suspenders: config.outputs.image_repository already falls back
+      # to ceteris90/project-fosu, but an empty value here would render as a
+      # bare ":<tag>" and fail buildx with "invalid reference format" (see the
+      # 2026-09-12 run) — so fall back again at the point of use.
+      IMAGE_REPOSITORY: ${{ needs.config.outputs.image_repository || 'ceteris90/project-fosu' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -293,11 +299,11 @@ jobs:
           push: true
           cache-from: type=gha
           tags: |
-            ${{ needs.config.outputs.image_repository }}:${{ github.sha }}
-            ${{ needs.config.outputs.image_repository }}:latest
+            ${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
+            ${{ env.IMAGE_REPOSITORY }}:latest
 
       - name: Summary
-        run: echo "Pushed ${{ needs.config.outputs.image_repository }}:${{ github.sha }} and :latest" >> "${GITHUB_STEP_SUMMARY}"
+        run: echo "Pushed ${IMAGE_REPOSITORY}:${{ github.sha }} and :latest" >> "${GITHUB_STEP_SUMMARY}"
 
   # ---------------------------------------------------------------------------
   # deploy.sh provision_infrastructure  -> terraform init/validate/plan[/apply]
@@ -376,6 +382,9 @@ jobs:
       id-token: write
       contents: read
     env:
+      # Same defense-in-depth fallback as the push job — never pass Ansible an
+      # empty image_repository extra-var, which would override its own default.
+      IMAGE_REPOSITORY: ${{ needs.config.outputs.image_repository || 'ceteris90/project-fosu' }}
       # refresh_vpn_profile.sh and site.yml both call `terraform output` against
       # the azurerm backend, so the same backend/provider auth is needed here.
       ARM_USE_OIDC: "true"
@@ -455,7 +464,7 @@ jobs:
             -i 2-infrastructure-as-code/Ansible/inventory.ini.example \
             2-infrastructure-as-code/Ansible/site.yml \
             --extra-vars "ansible_python_interpreter=$(command -v python3)" \
-            --extra-vars "image_repository=${{ needs.config.outputs.image_repository }}" \
+            --extra-vars "image_repository=${IMAGE_REPOSITORY}" \
             --extra-vars "image_tag=latest" \
             --extra-vars "fosu_namespace=project-fosu"
 
