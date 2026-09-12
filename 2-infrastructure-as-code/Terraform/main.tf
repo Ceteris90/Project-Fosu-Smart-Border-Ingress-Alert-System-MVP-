@@ -373,14 +373,18 @@ resource "azurerm_key_vault" "this" {
   purge_protection_enabled   = true
   soft_delete_retention_days = 90
   rbac_authorization_enabled = true
-  # Public access is required for Terraform (run outside the VNet) to write secrets; restricted to the deployer IP below.
+  # Public access is required for Terraform (run outside the VNet, and from
+  # CI runners with no stable IP) to write secrets. Network-level access is
+  # intentionally open (default_action = Allow); the real access boundary is
+  # Azure RBAC (rbac_authorization_enabled above) — only principals explicitly
+  # granted a Key Vault role (the deployer, the CI service principal) can read
+  # or write anything, regardless of source IP.
   public_network_access_enabled = true
   tags                          = local.tags
 
   network_acls {
-    default_action = "Deny"
+    default_action = "Allow"
     bypass         = "AzureServices"
-    ip_rules       = var.deployer_ip_cidr != "" ? [var.deployer_ip_cidr] : []
   }
 }
 
