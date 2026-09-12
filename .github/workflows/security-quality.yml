@@ -419,6 +419,12 @@ jobs:
         uses: azure/use-kubelogin@v1
         with:
           kubelogin-version: latest
+        env:
+          # azure/use-kubelogin reads GITHUB_TOKEN directly from the process
+          # env to resolve the latest kubelogin release; GitHub doesn't inject
+          # it into a step's shell automatically, only into the `github.token`
+          # expression context.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Python and Ansible dependencies
         run: |
@@ -517,6 +523,12 @@ jobs:
         uses: azure/use-kubelogin@v1
         with:
           kubelogin-version: latest
+        env:
+          # azure/use-kubelogin reads GITHUB_TOKEN directly from the process
+          # env to resolve the latest kubelogin release; GitHub doesn't inject
+          # it into a step's shell automatically, only into the `github.token`
+          # expression context.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Python and Ansible dependencies
         run: |
