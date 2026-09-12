@@ -403,10 +403,20 @@ Stop the mock sensor with `Ctrl+C`. For a short batch instead, use:
 python3 1-app-source-code/scripts/mock_sensor.py --once --n 20
 ```
 
-Then start the camera sensor. This workspace includes a locally generated,
-dark monochrome test clip at `.local/videos/vtest-night-ir.avi`. It simulates
-severe illumination loss, IR-style monochrome output, sensor noise, and lens
-falloff while retaining pedestrians for repeatable pipeline testing:
+Then start the camera sensor. `.local/` is git-ignored, so the dark monochrome
+test clip at `.local/videos/vtest-night-ir.avi` doesn't travel with the repo --
+generate it once per machine from Ultralytics' own bundled sample photo
+(`ultralytics/assets/bus.jpg`, installed with `requirements.txt`; real
+pedestrians, so detection is meaningful):
+
+```bash
+source .venv/bin/activate
+python3 1-app-source-code/scripts/generate_test_clip.py
+```
+
+This renders a clip that simulates severe illumination loss, IR-style
+monochrome output, sensor noise, and lens falloff while keeping the
+pedestrians detectable, for repeatable pipeline testing:
 
 ```bash
 test -r .local/videos/vtest-night-ir.avi
