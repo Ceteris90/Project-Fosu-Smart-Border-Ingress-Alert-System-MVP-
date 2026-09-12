@@ -565,18 +565,35 @@ dedicated `monitoring` namespace by Helm charts driven from Ansible.
   Alertmanager alerts (kube-prometheus-stack defaults plus
   `monitoring/fosu-alerts.yaml`).
 
-Prerequisites: `terraform apply` including `monitoring.tf`, the `helm` binary,
-and an active VPN tunnel with a working `/tmp/project-fosu-kubeconfig` (i.e. run
-`scripts/deploy.sh app` at least once first).
+Prerequisites: `terraform apply` including `monitoring.tf` (`scripts/deploy.sh
+infra`), the `helm` binary, and an active VPN tunnel. The playbook regenerates
+`/tmp/project-fosu-kubeconfig` from Terraform state on every run, so it no longer
+depends on a prior `scripts/deploy.sh app`.
 
 ```bash
 scripts/deploy.sh infra          # provisions the Loki storage + federated identity
 scripts/deploy.sh monitoring     # helm installs kps + loki + promtail
 
-# reach Grafana (ClusterIP only)
-kubectl -n monitoring port-forward svc/grafana 3000:80
+# everything below is ClusterIP -- point kubectl at the project kubeconfig,
+# otherwise it falls back to ~/.kube/config (e.g. a stale minikube context)
+export KUBECONFIG=/tmp/project-fosu-kubeconfig
+
+# each port-forward is foreground; run in its own terminal (or append &)
+kubectl -n monitoring port-forward svc/grafana          3000:80    # http://localhost:3000
+kubectl -n monitoring port-forward svc/kps-prometheus   9090:9090  # http://localhost:9090
+kubectl -n monitoring port-forward svc/kps-alertmanager 9093:9093  # http://localhost:9093
+kubectl -n monitoring port-forward svc/loki             3100:3100  # HTTP API only, no UI
+
+# Grafana admin credentials (username defaults to "admin")
+kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-user}'     | base64 -d ; echo
 kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d ; echo
 ```
+
+Loki has no web UI -- browse logs through Grafana (Explore, the pre-provisioned
+"Loki" datasource) or hit its API directly, e.g. `curl -s
+http://localhost:3100/ready` and `curl -sG
+http://localhost:3100/loki/api/v1/query_range --data-urlencode
+'query={namespace="project-fosu"}'`.
 
 Set `GRAFANA_ADMIN_PASSWORD` in the environment before the first run to choose
 the admin password; otherwise one is generated and stored in the `grafana-admin`

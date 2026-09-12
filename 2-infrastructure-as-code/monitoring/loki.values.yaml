@@ -1,6 +1,7 @@
 # grafana/loki in SingleBinary mode, chunks in Azure Blob via Workload Identity.
-# This is an Ansible template: the {{ loki_* }} values are filled from Terraform
-# outputs by monitoring.yml before `helm upgrade`.
+# This is an Ansible template: the loki_container / loki_storage_account /
+# loki_identity_client_id placeholders below are filled from Terraform outputs
+# by monitoring.yml before helm upgrade.
 
 fullnameOverride: loki
 deploymentMode: SingleBinary
@@ -22,13 +23,15 @@ loki:
           period: 24h
   storage:
     type: azure
+    # The chart derives the Azure `container_name` from bucketNames.chunks; an
+    # explicit `containerName` here is passed through verbatim and rejected by
+    # Loki as an unknown field (azure.BlobStorageConfig wants container_name).
     bucketNames:
       chunks: "{{ loki_container }}"
       ruler: "{{ loki_container }}"
       admin: "{{ loki_container }}"
     azure:
       accountName: "{{ loki_storage_account }}"
-      containerName: "{{ loki_container }}"
       useFederatedToken: true
   limits_config:
     retention_period: 720h

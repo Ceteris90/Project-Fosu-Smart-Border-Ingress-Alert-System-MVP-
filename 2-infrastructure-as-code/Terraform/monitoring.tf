@@ -1,21 +1,34 @@
-# Observability backing store: an Azure Blob container for Loki log chunks,
-# reached only through a private endpoint, with a workload-identity federated
-# credential so the Loki pod authenticates as a managed identity (no keys).
+# Observability backing store: an Azure Blob container for Loki log chunks.
+# In-cluster traffic goes through the private endpoint below; Loki authenticates
+# as a workload-identity federated credential (no keys). Public network access
+# stays on but firewalled to the deployer IP so the provider can complete its
+# data-plane readiness check and manage the container.
 
 resource "azurerm_storage_account" "loki" {
-  name                            = "st${var.name_prefix}loki${random_string.suffix.result}"
-  resource_group_name             = azurerm_resource_group.this.name
-  location                        = azurerm_resource_group.this.location
-  account_tier                    = "Standard"
-  account_replication_type        = var.loki_storage_replication_type
-  account_kind                    = "StorageV2"
-  min_tls_version                 = "TLS1_2"
+  name                     = "st${var.name_prefix}loki${random_string.suffix.result}"
+  resource_group_name      = azurerm_resource_group.this.name
+  location                 = azurerm_resource_group.this.location
+  account_tier             = "Standard"
+  account_replication_type = var.loki_storage_replication_type
+  account_kind             = "StorageV2"
+  min_tls_version          = "TLS1_2"
+  # Keep shared-key access enabled: the azurerm provider reads blob/queue/share
+  # service properties over the data plane with the account key on every plan.
+  # Loki never uses the key (it authenticates with Workload Identity); real
+  # access is still gated by the private endpoint + the firewall below.
+  shared_access_key_enabled       = true
   https_traffic_only_enabled      = true
-  shared_access_key_enabled       = false
   default_to_oauth_authentication = true
   allow_nested_items_to_be_public = false
-  public_network_access_enabled   = false
+  public_network_access_enabled   = true
   tags                            = local.tags
+
+  network_rules {
+    default_action = "Deny"
+    bypass         = ["AzureServices"]
+    # Storage firewall rejects /32 (and /31); a single host must be a bare IP.
+    ip_rules = var.deployer_ip_cidr != "" ? [trimsuffix(var.deployer_ip_cidr, "/32")] : []
+  }
 }
 
 resource "azurerm_storage_container" "loki" {

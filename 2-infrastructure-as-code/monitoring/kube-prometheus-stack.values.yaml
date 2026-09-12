@@ -82,9 +82,11 @@ grafana:
   resources:
     requests:
       cpu: 50m
-      memory: 128Mi
-    limits:
       memory: 256Mi
+    # 256Mi OOM-kills Grafana once the provisioned datasources, the two sidecars,
+    # and the ~15 community dashboards are loaded. 768Mi holds with headroom.
+    limits:
+      memory: 768Mi
   grafana.ini:
     analytics:
       check_for_updates: false

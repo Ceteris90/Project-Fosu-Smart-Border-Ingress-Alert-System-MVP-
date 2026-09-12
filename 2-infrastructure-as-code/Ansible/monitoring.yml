@@ -40,18 +40,8 @@
           No active VPN tunnel. Connect OpenVPN before running the monitoring
           playbook (see the Azure deployment section of the README).
 
-    - name: Check the kubeconfig can reach the cluster
-      ansible.builtin.command:
-        argv:
-          - kubectl
-          - --kubeconfig
-          - "{{ kubeconfig_path }}"
-          - --request-timeout=10s
-          - get
-          - namespace
-      changed_when: false
-      register: kube_check
-      failed_when: kube_check.rc != 0
+    - name: Regenerate and privately route the kubeconfig
+      ansible.builtin.include_tasks: tasks/bootstrap_kubeconfig.yml
 
     - name: Read Terraform outputs
       ansible.builtin.command:
